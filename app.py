@@ -64,7 +64,7 @@ def load_data(uploaded_file):
 def forecast_demand(historical_data, periods_ahead=12):
     data = pd.Series(historical_data).dropna()
     if len(data) < 6:
-        return None, None, None
+        return None, None, None, None
 
     X = np.arange(len(data)).reshape(-1, 1)
     y = data.values
@@ -78,6 +78,14 @@ def forecast_demand(historical_data, periods_ahead=12):
     fitted = model.predict(X)
     residuals = y - fitted
     rmse = np.sqrt(np.mean(residuals**2))
+
+    # Calculate R² for reliability assessment
+    ss_res = np.sum(residuals**2)
+    ss_tot = np.sum((y - np.mean(y))**2)
+    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+
+    # Calculate coefficient of variation (CV) for demand stability
+    cv = (data.std() / data.mean() * 100) if data.mean() > 0 else 100
 
     if len(data) >= 12:
         monthly_avg = []
@@ -97,7 +105,16 @@ def forecast_demand(historical_data, periods_ahead=12):
             forecast[i] *= seasonal_factors[month_idx]
 
     forecast = np.maximum(forecast, 0)
-    return forecast, rmse, model
+
+    # Return reliability metrics
+    reliability = {
+        'r_squared': r_squared,
+        'cv': cv,
+        'data_points': len(data),
+        'rmse': rmse
+    }
+
+    return forecast, rmse, model, reliability
 
 def calculate_safety_stock(historical_data, service_level=0.95):
     data = pd.Series(historical_data).dropna()
@@ -112,6 +129,50 @@ def calculate_safety_stock(historical_data, service_level=0.95):
 
     safety_stock = z * std_dev * np.sqrt(lead_time)
     return max(0, safety_stock)
+
+def get_reliability_assessment(reliability, data_len):
+    """Assess forecast reliability and return Greek explanation"""
+    r2 = reliability['r_squared']
+    cv = reliability['cv']
+
+    # Determine reliability level
+    if data_len < 6:
+        level = "insufficient"
+        color = "red"
+    elif r2 >= 0.7 and cv < 30:
+        level = "high"
+        color = "green"
+    elif r2 >= 0.4 and cv < 50:
+        level = "medium"
+        color = "orange"
+    else:
+        level = "low"
+        color = "red"
+
+    explanations = {
+        "insufficient": {
+            "title": "⚠️ Ανεπαρκή Δεδομένα",
+            "desc": "Λιγότεροι από 6 μήνες ιστορικού. Δεν είναι δυνατή αξιόπιστη πρόβλεψη.",
+            "recommendation": "Συνιστάται χρήση μέσου όρου τελευταίου τριμήνου + 30% buffer."
+        },
+        "high": {
+            "title": "✅ Υψηλή Αξιοπιστία Πρόβλεψης",
+            "desc": f"Το μοντέλο εξηγεί {r2*100:.0f}% της μεταβλητότητας. Η ζήτηση είναι σταθερή (CV={cv:.0f}%).",
+            "recommendation": "Οι προβλέψεις είναι αξιόπιστες. Μπορείτε να βασιστείτε στις συστάσεις."
+        },
+        "medium": {
+            "title": "⚡ Μέτρια Αξιοπιστία Πρόβλεψης",
+            "desc": f"Το μοντέλο εξηγεί {r2*100:.0f}% της μεταβλητότητας. Υπάρχει κάποια αστάθεια στη ζήτηση (CV={cv:.0f}%).",
+            "recommendation": "Συνιστάται προσθήκη 15-20% επιπλέον buffer στο προτεινόμενο απόθεμα."
+        },
+        "low": {
+            "title": "🔴 Χαμηλή Αξιοπιστία Πρόβλεψης",
+            "desc": f"Η ζήτηση είναι πολύ ασταθής (CV={cv:.0f}%) ή το μοντέλο δεν ταιριάζει καλά (R²={r2*100:.0f}%).",
+            "recommendation": "Οι προβλέψεις έχουν μεγάλη αβεβαιότητα. Συνιστάται προσθήκη 30-50% buffer ή χειροκίνητη εκτίμηση."
+        }
+    }
+
+    return level, color, explanations[level]
 
 # --- MAIN APP ---
 def main():
@@ -138,6 +199,11 @@ def main():
         - Επεξεργασία μόνο στη μνήμη
         - Τίποτα δεν αποθηκεύεται στον server
         - Τα δεδομένα διαγράφονται όταν κλείσει η σελίδα
+
+        ### Μεθοδολογία Πρόβλεψης:
+        - **Γραμμική παλινδρόμηση** με εποχιακή προσαρμογή
+        - **Safety Stock** βάσει τυπικής απόκλισης και επιπέδου εξυπηρέτησης
+        - **Αξιολόγηση αξιοπιστίας** βάσει R² και μεταβλητότητας ζήτησης
         """)
         return
 
@@ -179,26 +245,25 @@ def main():
 
     # Forecast settings
     st.sidebar.header("Ρυθμίσεις Πρόβλεψης")
-    forecast_months = st.sidebar.slider("Ορίζοντας Πρόβλεψης (μήνες)", 1, 24, 12)
-    service_level = st.sidebar.selectbox("Service Level", [0.90, 0.95, 0.99], index=1)
+    forecast_months = st.sidebar.slider("Ορίζοντας Πρόβλεψης (μήνες)", 1, 24, 3)
+    service_level = st.sidebar.selectbox(
+        "Επίπεδο Εξυπηρέτησης",
+        [0.90, 0.95, 0.99],
+        index=1,
+        format_func=lambda x: f"{int(x*100)}%"
+    )
 
-    # --- MAIN CONTENT ---
-    col1, col2, col3 = st.columns(3)
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("""
+    **Επίπεδο Εξυπηρέτησης:**
+    - 90%: Χαμηλότερο safety stock
+    - 95%: Συνιστώμενο (standard)
+    - 99%: Υψηλότερο safety stock
+    """)
 
-    with col1:
-        st.metric("Κωδικός SKU", product_row['SKU_Short'])
-    with col2:
-        st.metric("Κατηγορία", product_row['Category'])
-    with col3:
-        sku_short = product_row['SKU_Short']
-        stock_match = stock_df[stock_df['Material Code'].str.contains(sku_short, na=False)]
-        if not stock_match.empty:
-            current_stock = stock_match.iloc[0]['Unrestricted Stock']
-            st.metric("Τρέχον Απόθεμα", f"{int(current_stock):,}")
-        else:
-            st.metric("Τρέχον Απόθεμα", "Μ/Δ")
-
-    st.subheader(product_row['Product_Name'])
+    # Extract data
+    sku_short = product_row['SKU_Short']
+    stock_match = stock_df[stock_df['Material Code'].str.contains(sku_short, na=False)]
 
     historical = product_row[date_columns].values.astype(float)
     dates = pd.to_datetime([f"{d}-01" for d in date_columns])
@@ -209,8 +274,165 @@ def main():
     })
     hist_df = hist_df.dropna()
 
+    # Get current stock
+    current_stock = stock_match.iloc[0]['Unrestricted Stock'] if not stock_match.empty else None
+
+    # ============================================
+    # MAIN RECOMMENDATION SECTION (TOP OF PAGE)
+    # ============================================
+    st.markdown("---")
+    st.header("📦 Σύσταση Αποθέματος")
+
+    if len(hist_df) >= 6:
+        forecast, rmse, model, reliability = forecast_demand(hist_df['Demand'].values, forecast_months)
+        safety_stock = calculate_safety_stock(hist_df['Demand'].values, service_level)
+
+        if forecast is not None:
+            level, color, assessment = get_reliability_assessment(reliability, len(hist_df))
+
+            # Calculate recommended stock
+            next_month_demand = forecast[0]
+            total_forecast = forecast.sum()
+            recommended_stock = total_forecast + safety_stock
+
+            # Main recommendation cards
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                st.metric(
+                    "🎯 Προτεινόμενο Απόθεμα",
+                    f"{recommended_stock:,.0f}",
+                    help=f"Για τους επόμενους {forecast_months} μήνες + safety stock"
+                )
+
+            with col2:
+                st.metric(
+                    "📈 Πρόβλεψη Ζήτησης",
+                    f"{total_forecast:,.0f}",
+                    help=f"Συνολική ζήτηση {forecast_months} μηνών"
+                )
+
+            with col3:
+                st.metric(
+                    "🛡️ Safety Stock",
+                    f"{safety_stock:,.0f}",
+                    help=f"Επίπεδο εξυπηρέτησης {int(service_level*100)}%"
+                )
+
+            with col4:
+                if current_stock is not None:
+                    diff = current_stock - recommended_stock
+                    if diff >= 0:
+                        st.metric("📊 Κατάσταση", "Επαρκές", f"+{diff:,.0f}")
+                    else:
+                        st.metric("📊 Κατάσταση", "Ανεπαρκές", f"{diff:,.0f}")
+                else:
+                    st.metric("📊 Τρέχον Απόθεμα", "Μ/Δ")
+
+            # Reliability assessment box
+            if level == "high":
+                st.success(f"""
+                **{assessment['title']}**
+
+                {assessment['desc']}
+
+                **Σύσταση:** {assessment['recommendation']}
+                """)
+            elif level == "medium":
+                st.warning(f"""
+                **{assessment['title']}**
+
+                {assessment['desc']}
+
+                **Σύσταση:** {assessment['recommendation']}
+                """)
+            else:
+                st.error(f"""
+                **{assessment['title']}**
+
+                {assessment['desc']}
+
+                **Σύσταση:** {assessment['recommendation']}
+                """)
+
+            # Methodology explanation
+            with st.expander("ℹ️ Μεθοδολογία Υπολογισμού"):
+                st.markdown(f"""
+                ### Πώς υπολογίστηκε η σύσταση:
+
+                1. **Πρόβλεψη Ζήτησης ({total_forecast:,.0f} κιβώτια)**
+                   - Μέθοδος: Γραμμική παλινδρόμηση με εποχιακή προσαρμογή
+                   - Βάση: {len(hist_df)} μήνες ιστορικών δεδομένων
+                   - Ορίζοντας: {forecast_months} μήνες
+
+                2. **Safety Stock ({safety_stock:,.0f} κιβώτια)**
+                   - Τύπος: Z × σ × √(Lead Time)
+                   - Z-score για {int(service_level*100)}%: {1.28 if service_level==0.90 else 1.65 if service_level==0.95 else 2.33}
+                   - Τυπική απόκλιση ζήτησης: {hist_df['Demand'].std():,.0f}
+                   - Lead time: 1 μήνας
+
+                3. **Αξιολόγηση Αξιοπιστίας**
+                   - R² (ποσοστό εξήγησης): {reliability['r_squared']*100:.1f}%
+                   - CV (συντελεστής μεταβλητότητας): {reliability['cv']:.1f}%
+                   - RMSE (σφάλμα πρόβλεψης): {rmse:,.0f} κιβώτια
+
+                ### Ερμηνεία αξιοπιστίας:
+                - **R² > 70% και CV < 30%**: Υψηλή αξιοπιστία
+                - **R² 40-70% ή CV 30-50%**: Μέτρια αξιοπιστία
+                - **R² < 40% ή CV > 50%**: Χαμηλή αξιοπιστία
+                """)
+
+            # Monthly breakdown
+            st.subheader("📅 Ανάλυση ανά Μήνα")
+
+            forecast_dates = pd.date_range(
+                start=hist_df['Date'].max() + pd.DateOffset(months=1),
+                periods=forecast_months,
+                freq='MS'
+            )
+
+            monthly_df = pd.DataFrame({
+                'Μήνας': forecast_dates.strftime('%Y-%m'),
+                'Πρόβλεψη Ζήτησης': forecast.round(0).astype(int),
+                'Safety Stock': [int(safety_stock)] * len(forecast),
+                'Συνιστώμενο Απόθεμα': (forecast + safety_stock).round(0).astype(int)
+            })
+
+            st.dataframe(monthly_df, use_container_width=True, hide_index=True)
+
+    else:
+        st.warning(f"""
+        ⚠️ **Ανεπαρκή δεδομένα για πρόβλεψη**
+
+        Διαθέσιμοι μήνες: {len(hist_df)} (απαιτούνται τουλάχιστον 6)
+
+        **Εναλλακτική σύσταση:** Χρησιμοποιήστε τον μέσο όρο των τελευταίων διαθέσιμων μηνών + 30% buffer.
+        """)
+
+        if len(hist_df) > 0:
+            avg = hist_df['Demand'].mean()
+            buffer_stock = avg * 1.3 * forecast_months
+            st.info(f"Εκτιμώμενο απόθεμα (με 30% buffer): **{buffer_stock:,.0f}** για {forecast_months} μήνες")
+
+    st.markdown("---")
+
+    # --- PRODUCT INFO ---
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric("Κωδικός SKU", product_row['SKU_Short'])
+    with col2:
+        st.metric("Κατηγορία", product_row['Category'])
+    with col3:
+        if current_stock is not None:
+            st.metric("Τρέχον Απόθεμα", f"{int(current_stock):,}")
+        else:
+            st.metric("Τρέχον Απόθεμα", "Μ/Δ")
+
+    st.subheader(product_row['Product_Name'])
+
     # --- TABS ---
-    tab1, tab2, tab3, tab4 = st.tabs(["Ιστορική Ανάλυση", "Πρόβλεψη", "Ανάλυση Αποθέματος", "Σύγκριση"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Ιστορική Ανάλυση", "Γράφημα Πρόβλεψης", "Ανάλυση Αποθέματος", "Σύγκριση"])
 
     with tab1:
         st.subheader("Ιστορική Ζήτηση")
@@ -261,10 +483,10 @@ def main():
             st.warning("Δεν υπάρχουν ιστορικά δεδομένα")
 
     with tab2:
-        st.subheader("Πρόβλεψη Ζήτησης")
+        st.subheader("Γράφημα Πρόβλεψης")
 
         if len(hist_df) >= 6:
-            forecast, rmse, model = forecast_demand(hist_df['Demand'].values, forecast_months)
+            forecast, rmse, model, reliability = forecast_demand(hist_df['Demand'].values, forecast_months)
 
             if forecast is not None:
                 last_date = hist_df['Date'].max()
@@ -308,22 +530,6 @@ def main():
                     yaxis_title='Κιβώτια'
                 )
                 st.plotly_chart(fig, use_container_width=True)
-
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Πρόβλεψη Επόμενου Μήνα", f"{forecast[0]:,.0f}")
-                with col2:
-                    st.metric(f"Σύνολο {forecast_months}μ", f"{forecast.sum():,.0f}")
-                with col3:
-                    st.metric("RMSE Πρόβλεψης", f"{rmse:,.0f}")
-                with col4:
-                    safety = calculate_safety_stock(hist_df['Demand'].values, service_level)
-                    st.metric("Safety Stock", f"{safety:,.0f}")
-
-                st.subheader("Λεπτομέρειες Πρόβλεψης")
-                forecast_df['Μήνας'] = forecast_df['Date'].dt.strftime('%Y-%m')
-                forecast_df['Πρόβλεψη'] = forecast_df['Forecast'].round(0).astype(int)
-                st.dataframe(forecast_df[['Μήνας', 'Πρόβλεψη']], use_container_width=True)
             else:
                 st.warning("Αδυναμία δημιουργίας πρόβλεψης")
         else:
@@ -432,41 +638,56 @@ def main():
 
         sku = row['SKU_Short']
         stock_match_row = stock_df[stock_df['Material Code'].str.contains(sku, na=False)]
-        current_stock = stock_match_row.iloc[0]['Unrestricted Stock'] if not stock_match_row.empty else None
+        curr_stock = stock_match_row.iloc[0]['Unrestricted Stock'] if not stock_match_row.empty else None
 
         if len(hist) >= 6:
-            fc, _, _ = forecast_demand(hist.values, 3)
+            fc, fc_rmse, _, fc_rel = forecast_demand(hist.values, 3)
             next_3m = fc.sum() if fc is not None else None
+            safety = calculate_safety_stock(hist.values, service_level)
+            recommended = next_3m + safety if next_3m else None
+            rel_level = "✅" if fc_rel and fc_rel['r_squared'] >= 0.7 else "⚡" if fc_rel and fc_rel['r_squared'] >= 0.4 else "🔴"
         else:
             next_3m = None
+            recommended = None
+            rel_level = "⚠️"
 
         avg_demand = hist.mean() if len(hist) > 0 else None
-        latest = hist.iloc[-1] if len(hist) > 0 else None
+
+        # Status
+        if curr_stock and recommended:
+            status = "✅" if curr_stock >= recommended else "🔴"
+        else:
+            status = "-"
 
         summary_data.append({
             'SKU': sku,
-            'Προϊόν': str(row['Product_Name'])[:35],
-            'Κατηγορία': row['Category'],
-            'Τρέχον Απόθεμα': current_stock,
-            'Μέση Μηνιαία': avg_demand,
-            'Τελευταίος Μήνας': latest,
+            'Προϊόν': str(row['Product_Name'])[:30],
+            'Τρέχον': curr_stock,
             'Πρόβλεψη 3μ': next_3m,
-            'Μήνες Κάλυψης': current_stock / avg_demand if current_stock and avg_demand and avg_demand > 0 else None
+            'Σύσταση': recommended,
+            'Κατάσταση': status,
+            'Αξιοπιστία': rel_level
         })
 
     summary_df = pd.DataFrame(summary_data)
 
     st.dataframe(
         summary_df.style.format({
-            'Τρέχον Απόθεμα': lambda x: f"{int(x):,}" if pd.notna(x) else "-",
-            'Μέση Μηνιαία': lambda x: f"{x:,.0f}" if pd.notna(x) else "-",
-            'Τελευταίος Μήνας': lambda x: f"{x:,.0f}" if pd.notna(x) else "-",
+            'Τρέχον': lambda x: f"{int(x):,}" if pd.notna(x) else "-",
             'Πρόβλεψη 3μ': lambda x: f"{x:,.0f}" if pd.notna(x) else "-",
-            'Μήνες Κάλυψης': lambda x: f"{x:.1f}" if pd.notna(x) else "-"
+            'Σύσταση': lambda x: f"{x:,.0f}" if pd.notna(x) else "-",
         }),
         use_container_width=True,
         height=400
     )
+
+    st.markdown("""
+    **Υπόμνημα:**
+    - ✅ Υψηλή αξιοπιστία / Επαρκές απόθεμα
+    - ⚡ Μέτρια αξιοπιστία
+    - 🔴 Χαμηλή αξιοπιστία / Ανεπαρκές απόθεμα
+    - ⚠️ Ανεπαρκή δεδομένα
+    """)
 
 if __name__ == "__main__":
     main()
