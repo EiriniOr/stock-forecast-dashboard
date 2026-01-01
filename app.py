@@ -223,9 +223,16 @@ def main():
         return (values <= 0).all()
 
     # Identify old products (no positive values in last 12 months)
-    def is_old_product(row):
-        # Get last 12 date columns
+    def is_old_product_12m(row):
         recent_cols = date_columns[-12:] if len(date_columns) >= 12 else date_columns
+        values = pd.Series(row[recent_cols].values.astype(float)).dropna()
+        if len(values) == 0:
+            return True
+        return (values <= 0).all()
+
+    # Identify products not sold in last 6 months
+    def is_old_product_6m(row):
+        recent_cols = date_columns[-6:] if len(date_columns) >= 6 else date_columns
         values = pd.Series(row[recent_cols].values.astype(float)).dropna()
         if len(values) == 0:
             return True
@@ -233,33 +240,40 @@ def main():
 
     # Mark products
     data_df['_discontinued'] = data_df.apply(is_discontinued, axis=1)
-    data_df['_old'] = data_df.apply(is_old_product, axis=1)
+    data_df['_old_12m'] = data_df.apply(is_old_product_12m, axis=1)
+    data_df['_old_6m'] = data_df.apply(is_old_product_6m, axis=1)
 
     # --- PRODUCT SELECTION ---
     st.markdown("---")
 
     # Filter checkboxes
-    col_filter1, col_filter2 = st.columns(2)
+    col_filter1, col_filter2, col_filter3 = st.columns(3)
     with col_filter1:
-        show_discontinued = st.checkbox("Εμφάνιση διακοπτόμενων προϊόντων", value=False,
+        show_discontinued = st.checkbox("Διακοπτόμενα", value=False,
                                         help="Προϊόντα με μόνο αρνητικές τιμές (επιστροφές)")
     with col_filter2:
-        show_old = st.checkbox("Εμφάνιση παλιών προϊόντων (χωρίς πωλήσεις 12 μήνες)", value=False,
-                               help="Προϊόντα χωρίς πωλήσεις τους τελευταίους 12 μήνες")
+        show_old_6m = st.checkbox("Χωρίς πωλήσεις 6 μήνες", value=False,
+                                  help="Προϊόντα χωρίς πωλήσεις τους τελευταίους 6 μήνες")
+    with col_filter3:
+        show_old_12m = st.checkbox("Χωρίς πωλήσεις 12 μήνες", value=False,
+                                   help="Προϊόντα χωρίς πωλήσεις τους τελευταίους 12 μήνες")
 
     # Apply filters
     working_df = data_df.copy()
     if not show_discontinued:
         working_df = working_df[~working_df['_discontinued']]
-    if not show_old:
-        working_df = working_df[~working_df['_old']]
+    if not show_old_6m:
+        working_df = working_df[~working_df['_old_6m']]
+    if not show_old_12m:
+        working_df = working_df[~working_df['_old_12m']]
 
     # Show filter stats
     n_total = len(data_df)
     n_discontinued = data_df['_discontinued'].sum()
-    n_old = data_df['_old'].sum()
+    n_old_6m = data_df['_old_6m'].sum()
+    n_old_12m = data_df['_old_12m'].sum()
     n_shown = len(working_df)
-    st.caption(f"Εμφανίζονται {n_shown}/{n_total} προϊόντα (Διακοπτόμενα: {n_discontinued}, Παλιά: {n_old})")
+    st.caption(f"Εμφανίζονται {n_shown}/{n_total} προϊόντα")
 
     col1, col2 = st.columns([2, 3])
 
@@ -574,7 +588,7 @@ def main():
     )
 
     st.caption("🤖 = Δική μας πρόβλεψη | 📋 = Υπάρχον σύστημα | Ταξινόμηση: Μεγαλύτερη ανάγκη παραγγελίας πρώτα")
-    st.caption("v2.1 - 01/01/2026")
+    st.caption("v2.2 - 01/01/2026")
 
 if __name__ == "__main__":
     main()
