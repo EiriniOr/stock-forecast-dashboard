@@ -332,59 +332,90 @@ def main():
     # Days of stock remaining
     days_remaining = current_stock / daily_avg if daily_avg > 0 else float('inf')
 
-    # --- METRICS DISPLAY ---
-    st.markdown("### 🎯 Απαιτούμενο Απόθεμα")
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        st.metric("📦 Τρέχον Απόθεμα", f"{current_stock:,}")
+    # --- CURRENT STOCK INFO ---
+    st.markdown("### 📦 Τρέχον Απόθεμα (από S1P)")
+    col_stock1, col_stock2 = st.columns(2)
+    with col_stock1:
+        st.metric("Διαθέσιμο Απόθεμα", f"{current_stock:,} κιβώτια")
+    with col_stock2:
         if days_remaining != float('inf'):
-            st.caption(f"≈ {days_remaining:.0f} ημέρες")
+            st.metric("Ημέρες Κάλυψης", f"{days_remaining:.0f} ημέρες")
+        else:
+            st.metric("Ημέρες Κάλυψης", "—")
 
-    with col2:
-        diff_1d = current_stock - needed_1d
-        st.metric("🔮 Αύριο (1 ημέρα)", f"{needed_1d:,.0f}", f"{diff_1d:+,.0f}")
+    # ================================================================
+    # SIDE-BY-SIDE COMPARISON: OUR PREDICTION vs SYSTEM PREDICTION
+    # ================================================================
+    st.markdown("---")
+    st.markdown("## ⚖️ Σύγκριση Προβλέψεων")
 
-    with col3:
-        diff_7d = current_stock - needed_7d
-        st.metric("📅 Εβδομάδα (7 ημέρες)", f"{needed_7d:,.0f}", f"{diff_7d:+,.0f}")
+    left_col, right_col = st.columns(2)
 
-    with col4:
-        diff_14d = current_stock - needed_14d
-        st.metric("📆 Δεκαπενθήμερο (14 ημέρες)", f"{needed_14d:,.0f}", f"{diff_14d:+,.0f}")
+    # --- LEFT: OUR PREDICTION ---
+    with left_col:
+        st.markdown("""
+        <div style="background-color: #d4edda; padding: 15px; border-radius: 10px; border: 2px solid #28a745;">
+        <h3 style="color: #155724; margin: 0;">🤖 ΔΙΚΗ ΜΑΣ ΠΡΟΒΛΕΨΗ</h3>
+        <p style="color: #155724; font-size: 12px; margin: 5px 0 0 0;">Machine Learning (Gradient Boosting)</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-    # Reliability indicator
-    if level == "high":
-        st.success(f"{icon} {message} — R²={reliability['r_squared']:.2f}, CV={reliability['cv']:.0f}%")
-    elif level == "medium":
-        st.warning(f"{icon} {message} — R²={reliability['r_squared']:.2f}, CV={reliability['cv']:.0f}%")
-    else:
-        st.error(f"{icon} {message}")
+        st.markdown("")
 
-    # --- EXISTING SYSTEM COMPARISON ---
-    if existing_stock_days is not None and pd.notna(existing_stock_days):
-        st.markdown("---")
-        st.markdown("### 📋 Από υπάρχον σύστημα, OOS πρόβλεψη!")
+        # Our predictions
+        our_status_7d = "✅ ΕΠΑΡΚΕΙΑ" if current_stock >= needed_7d else "🔴 ΕΛΛΕΙΨΗ"
+        our_status_color = "green" if current_stock >= needed_7d else "red"
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            status_icon = "🔴" if existing_status == "OOS" else "✅"
-            st.metric(f"{status_icon} Κατάσταση", existing_status if pd.notna(existing_status) else "OK")
-        with col2:
-            st.metric("📊 Ημέρες Αποθέματος (σύστημα)", f"{existing_stock_days:.0f}")
-        with col3:
+        st.markdown(f"**Κατάσταση 7 ημερών:** <span style='color:{our_status_color}; font-weight:bold;'>{our_status_7d}</span>", unsafe_allow_html=True)
+
+        st.metric("📅 Ημέρες αποθέματος", f"{days_remaining:.0f}" if days_remaining != float('inf') else "—")
+        st.metric("🔮 Ανάγκη 1 ημέρα", f"{needed_1d:,.0f}")
+        st.metric("📅 Ανάγκη 7 ημέρες", f"{needed_7d:,.0f}")
+        st.metric("📆 Ανάγκη 14 ημέρες", f"{needed_14d:,.0f}")
+
+        # Reliability indicator
+        if level == "high":
+            st.success(f"{icon} {message}")
+        elif level == "medium":
+            st.warning(f"{icon} {message}")
+        else:
+            st.error(f"{icon} {message}")
+
+    # --- RIGHT: EXISTING SYSTEM PREDICTION ---
+    with right_col:
+        st.markdown("""
+        <div style="background-color: #fff3cd; padding: 15px; border-radius: 10px; border: 2px solid #ffc107;">
+        <h3 style="color: #856404; margin: 0;">📋 ΥΠΑΡΧΟΝ ΣΥΣΤΗΜΑ</h3>
+        <p style="color: #856404; font-size: 12px; margin: 5px 0 0 0;">Από το Excel αρχείο (SOP sheet)</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("")
+
+        if existing_stock_days is not None and pd.notna(existing_stock_days):
+            sys_status_display = "🔴 OOS" if existing_status == "OOS" else "✅ OK"
+            sys_status_color = "red" if existing_status == "OOS" else "green"
+
+            st.markdown(f"**Κατάσταση:** <span style='color:{sys_status_color}; font-weight:bold;'>{sys_status_display}</span>", unsafe_allow_html=True)
+
+            st.metric("📊 Ημέρες αποθέματος", f"{existing_stock_days:.0f}")
             if pd.notna(existing_daily_sales):
-                st.metric("📈 Ημερ. Πωλήσεις (σύστημα)", f"{existing_daily_sales:.0f}")
+                st.metric("📈 Μ.Ο. ημερ. πωλήσεις", f"{existing_daily_sales:.0f}")
+            else:
+                st.metric("📈 Μ.Ο. ημερ. πωλήσεις", "—")
 
-        # Compare predictions
-        if days_remaining != float('inf') and existing_stock_days and existing_stock_days > 0:
-            diff_pct = ((days_remaining - existing_stock_days) / existing_stock_days) * 100
-            if abs(diff_pct) > 20:
-                st.info(f"ℹ️ Διαφορά από σύστημα: {diff_pct:+.0f}% στις ημέρες αποθέματος")
+            # Comparison
+            if days_remaining != float('inf') and existing_stock_days > 0:
+                diff_days = days_remaining - existing_stock_days
+                diff_pct = (diff_days / existing_stock_days) * 100
+                if abs(diff_pct) > 10:
+                    st.info(f"Διαφορά: {diff_days:+.0f} ημέρες ({diff_pct:+.0f}%)")
+        else:
+            st.warning("Δεν βρέθηκε πρόβλεψη για αυτό το προϊόν στο υπάρχον σύστημα")
 
     # --- CHART ---
     st.markdown("---")
+    st.markdown("### 📈 Ιστορικά & Πρόβλεψη (Δικό μας μοντέλο)")
 
     fig = go.Figure()
 
@@ -466,7 +497,8 @@ def main():
 
     # --- ALL PRODUCTS SUMMARY ---
     st.markdown("---")
-    st.subheader("📋 Όλα τα Προϊόντα")
+    st.subheader("📋 Σύνοψη Όλων των Προϊόντων")
+    st.caption("🤖 = Δική μας πρόβλεψη | 📋 = Υπάρχον σύστημα (Excel)")
 
     summary_data = []
     for idx, row in filtered_df.iterrows():
@@ -488,18 +520,20 @@ def main():
 
         # Simple 7-day forecast
         need_7d = daily_avg * 7 * 1.2 if daily_avg > 0 else None
-        status = "✅" if curr >= (need_7d or 0) else "🔴" if need_7d else "⚠️"
+        our_status = "✅" if curr >= (need_7d or 0) else "🔴" if need_7d else "⚠️"
         our_days = curr / daily_avg if daily_avg > 0 else None
 
+        # System status
+        sys_status_display = "🔴" if sys_status == "OOS" else "✅" if pd.notna(sys_status) else "—"
+
         summary_data.append({
-            'Κατάσταση': status,
+            '🤖': our_status,
+            '📋': sys_status_display,
             'Material': mat,
             'Προϊόν': product_name,
-            'Απόθεμα': curr,
-            'Ανάγκη 7ημ': int(need_7d) if need_7d else None,
-            'Ημ.Απόθ.(Δικό)': int(our_days) if our_days else None,
-            'Ημ.Απόθ.(Σύστ)': int(sys_days) if sys_days else None,
-            'Σύστ.Status': sys_status if pd.notna(sys_status) else "—"
+            'Απόθεμα (S1P)': curr,
+            '🤖 Ημέρες': int(our_days) if our_days else None,
+            '📋 Ημέρες': int(sys_days) if sys_days else None,
         })
 
     summary_df = pd.DataFrame(summary_data)
@@ -521,16 +555,15 @@ def main():
 
     st.dataframe(
         summary_df.style.format({
-            'Απόθεμα': lambda x: f"{x:,}" if pd.notna(x) else "—",
-            'Ανάγκη 7ημ': lambda x: f"{x:,}" if pd.notna(x) else "—",
-            'Ημ.Απόθ.(Δικό)': lambda x: f"{x:,}" if pd.notna(x) else "—",
-            'Ημ.Απόθ.(Σύστ)': lambda x: f"{x:,}" if pd.notna(x) else "—",
+            'Απόθεμα (S1P)': lambda x: f"{x:,}" if pd.notna(x) else "—",
+            '🤖 Ημέρες': lambda x: f"{x:,}" if pd.notna(x) else "—",
+            '📋 Ημέρες': lambda x: f"{x:,}" if pd.notna(x) else "—",
         }),
         use_container_width=True,
         height=400
     )
 
-    st.caption("✅ Επαρκές | 🔴 Ανεπαρκές | ⚠️ Λίγα δεδομένα | Ημ.Απόθ. = Ημέρες αποθέματος")
+    st.caption("✅ = Επαρκές | 🔴 = Ανεπαρκές/OOS | ⚠️ = Λίγα δεδομένα | — = Δεν υπάρχει")
 
 if __name__ == "__main__":
     main()
