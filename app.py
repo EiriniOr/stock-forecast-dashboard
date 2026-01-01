@@ -1,6 +1,6 @@
 """
 Stock Forecasting Dashboard - Cloud Version
-Data uploaded in-memory only, never saved to disk
+Πίνακας Πρόβλεψης Αποθέματος
 """
 import streamlit as st
 import pandas as pd
@@ -11,21 +11,18 @@ from sklearn.linear_model import LinearRegression
 import warnings
 warnings.filterwarnings('ignore')
 
-st.set_page_config(page_title="Stock Forecast Dashboard", layout="wide")
+st.set_page_config(page_title="Πρόβλεψη Αποθέματος", layout="wide")
 
 # --- DATA LOADING ---
 @st.cache_data
 def load_data(uploaded_file):
     """Parse uploaded Excel file - data stays in memory only"""
 
-    # Read cases/sales data
     df_raw = pd.read_excel(uploaded_file, sheet_name='Cases2021 2022 FC', header=None)
 
-    # Extract years from row 8 and months from row 9
     years_row = df_raw.iloc[8, 3:27].values
     months_row = df_raw.iloc[9, 3:27].values
 
-    # Build date columns
     date_cols = []
     for y, m in zip(years_row, months_row):
         if pd.notna(y) and pd.notna(m):
@@ -36,10 +33,8 @@ def load_data(uploaded_file):
         else:
             date_cols.append(None)
 
-    # Get data starting from row 10
     data_df = df_raw.iloc[10:].copy()
 
-    # Create column names
     col_names = ['Category', 'SKU_Code', 'Product_Name']
     for i, dc in enumerate(date_cols):
         if dc:
@@ -47,25 +42,19 @@ def load_data(uploaded_file):
         else:
             col_names.append(f'extra_{i}')
 
-    # Add remaining columns
     remaining = len(data_df.columns) - len(col_names)
     for i in range(remaining):
         col_names.append(f'meta_{i}')
 
     data_df.columns = col_names[:len(data_df.columns)]
-
-    # Filter valid rows
     data_df = data_df[data_df['SKU_Code'].notna()].reset_index(drop=True)
 
-    # Clean SKU codes
     data_df['SKU_Code'] = data_df['SKU_Code'].astype(str).str.strip()
     data_df['SKU_Short'] = data_df['SKU_Code'].str[-8:]
 
-    # Get date columns only
     date_columns = [c for c in data_df.columns if '-' in str(c) and str(c)[:4].isdigit()]
 
-    # Read stock data
-    uploaded_file.seek(0)  # Reset file pointer
+    uploaded_file.seek(0)
     df_stock = pd.read_excel(uploaded_file, sheet_name='Stock')
     df_stock['Material Code'] = df_stock['Material Code'].astype(str).str.strip()
 
@@ -73,8 +62,6 @@ def load_data(uploaded_file):
 
 # --- FORECASTING ---
 def forecast_demand(historical_data, periods_ahead=12):
-    """Simple forecasting using trend + seasonality"""
-
     data = pd.Series(historical_data).dropna()
     if len(data) < 6:
         return None, None, None
@@ -92,7 +79,6 @@ def forecast_demand(historical_data, periods_ahead=12):
     residuals = y - fitted
     rmse = np.sqrt(np.mean(residuals**2))
 
-    # Seasonal adjustment
     if len(data) >= 12:
         monthly_avg = []
         for m in range(12):
@@ -114,7 +100,6 @@ def forecast_demand(historical_data, periods_ahead=12):
     return forecast, rmse, model
 
 def calculate_safety_stock(historical_data, service_level=0.95):
-    """Calculate safety stock based on demand variability"""
     data = pd.Series(historical_data).dropna()
     if len(data) < 3:
         return 0
@@ -130,53 +115,51 @@ def calculate_safety_stock(historical_data, service_level=0.95):
 
 # --- MAIN APP ---
 def main():
-    st.title("Stock Forecasting Dashboard")
+    st.title("Πίνακας Πρόβλεψης Αποθέματος")
 
-    # Sidebar - File upload
-    st.sidebar.header("Data Upload")
-    st.sidebar.info("Your data stays private - processed in memory only, never saved")
+    # Sidebar
+    st.sidebar.header("Φόρτωση Δεδομένων")
+    st.sidebar.info("Τα δεδομένα παραμένουν ιδιωτικά - επεξεργασία μόνο στη μνήμη")
 
     uploaded_file = st.sidebar.file_uploader(
-        "Upload Excel file (.xlsx)",
+        "Ανέβασε αρχείο Excel (.xlsx)",
         type=['xlsx'],
-        help="File with 'Cases2021 2022 FC' and 'Stock' sheets"
+        help="Αρχείο με sheets 'Cases2021 2022 FC' και 'Stock'"
     )
 
     if uploaded_file is None:
-        st.info("Upload your Excel file in the sidebar to begin")
+        st.info("Ανέβασε το αρχείο Excel στην πλαϊνή μπάρα για να ξεκινήσεις")
         st.markdown("""
-        ### Required Excel structure:
-        - **Sheet 'Cases2021 2022 FC'**: Monthly demand data
-        - **Sheet 'Stock'**: Current stock levels
+        ### Απαιτούμενη δομή Excel:
+        - **Sheet 'Cases2021 2022 FC'**: Μηνιαία δεδομένα ζήτησης
+        - **Sheet 'Stock'**: Τρέχοντα επίπεδα αποθέματος
 
-        ### Data Privacy:
-        - File processed in-memory only
-        - Nothing saved to server
-        - Data cleared when session ends
+        ### Ασφάλεια Δεδομένων:
+        - Επεξεργασία μόνο στη μνήμη
+        - Τίποτα δεν αποθηκεύεται στον server
+        - Τα δεδομένα διαγράφονται όταν κλείσει η σελίδα
         """)
         return
 
-    # Load data
     try:
         data_df, stock_df, date_columns = load_data(uploaded_file)
-        st.sidebar.success(f"Loaded {len(data_df)} products")
+        st.sidebar.success(f"Φορτώθηκαν {len(data_df)} προϊόντα")
     except Exception as e:
-        st.error(f"Error loading data: {e}")
-        st.info("Check that file has required sheets")
+        st.error(f"Σφάλμα φόρτωσης: {e}")
+        st.info("Έλεγξε ότι το αρχείο έχει τα απαιτούμενα sheets")
         return
 
-    # Clear cache button
-    if st.sidebar.button("Reload Data"):
+    if st.sidebar.button("Επαναφόρτωση Δεδομένων"):
         st.cache_data.clear()
         st.rerun()
 
     # Product selection
-    st.sidebar.header("Product Selection")
+    st.sidebar.header("Επιλογή Προϊόντος")
 
-    categories = ['All'] + sorted(data_df['Category'].dropna().unique().tolist())
-    selected_category = st.sidebar.selectbox("Category", categories)
+    categories = ['Όλα'] + sorted(data_df['Category'].dropna().unique().tolist())
+    selected_category = st.sidebar.selectbox("Κατηγορία", categories)
 
-    if selected_category != 'All':
+    if selected_category != 'Όλα':
         filtered_df = data_df[data_df['Category'] == selected_category]
     else:
         filtered_df = data_df
@@ -186,38 +169,37 @@ def main():
     ).tolist()
 
     if not product_options:
-        st.warning("No products in selected category")
+        st.warning("Δεν υπάρχουν προϊόντα στην επιλεγμένη κατηγορία")
         return
 
-    selected_product = st.sidebar.selectbox("Select Product", product_options)
+    selected_product = st.sidebar.selectbox("Επιλογή Προϊόντος", product_options)
 
     selected_idx = product_options.index(selected_product)
     product_row = filtered_df.iloc[selected_idx]
 
     # Forecast settings
-    st.sidebar.header("Forecast Settings")
-    forecast_months = st.sidebar.slider("Forecast Horizon (months)", 1, 24, 12)
+    st.sidebar.header("Ρυθμίσεις Πρόβλεψης")
+    forecast_months = st.sidebar.slider("Ορίζοντας Πρόβλεψης (μήνες)", 1, 24, 12)
     service_level = st.sidebar.selectbox("Service Level", [0.90, 0.95, 0.99], index=1)
 
     # --- MAIN CONTENT ---
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.metric("SKU Code", product_row['SKU_Short'])
+        st.metric("Κωδικός SKU", product_row['SKU_Short'])
     with col2:
-        st.metric("Category", product_row['Category'])
+        st.metric("Κατηγορία", product_row['Category'])
     with col3:
         sku_short = product_row['SKU_Short']
         stock_match = stock_df[stock_df['Material Code'].str.contains(sku_short, na=False)]
         if not stock_match.empty:
             current_stock = stock_match.iloc[0]['Unrestricted Stock']
-            st.metric("Current Stock", f"{int(current_stock):,}")
+            st.metric("Τρέχον Απόθεμα", f"{int(current_stock):,}")
         else:
-            st.metric("Current Stock", "N/A")
+            st.metric("Τρέχον Απόθεμα", "Μ/Δ")
 
     st.subheader(product_row['Product_Name'])
 
-    # Extract historical data
     historical = product_row[date_columns].values.astype(float)
     dates = pd.to_datetime([f"{d}-01" for d in date_columns])
 
@@ -228,29 +210,29 @@ def main():
     hist_df = hist_df.dropna()
 
     # --- TABS ---
-    tab1, tab2, tab3, tab4 = st.tabs(["Historical Analysis", "Forecast", "Stock Analysis", "Comparison"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Ιστορική Ανάλυση", "Πρόβλεψη", "Ανάλυση Αποθέματος", "Σύγκριση"])
 
     with tab1:
-        st.subheader("Historical Demand")
+        st.subheader("Ιστορική Ζήτηση")
 
         if len(hist_df) > 0:
             fig = px.line(hist_df, x='Date', y='Demand',
-                         title='Monthly Demand Over Time',
+                         title='Μηνιαία Ζήτηση',
                          markers=True)
-            fig.update_layout(xaxis_title="Month", yaxis_title="Cases")
+            fig.update_layout(xaxis_title="Μήνας", yaxis_title="Κιβώτια")
             st.plotly_chart(fig, use_container_width=True)
 
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Avg Monthly Demand", f"{hist_df['Demand'].mean():,.0f}")
+                st.metric("Μέση Μηνιαία Ζήτηση", f"{hist_df['Demand'].mean():,.0f}")
             with col2:
-                st.metric("Max Demand", f"{hist_df['Demand'].max():,.0f}")
+                st.metric("Μέγιστη Ζήτηση", f"{hist_df['Demand'].max():,.0f}")
             with col3:
-                st.metric("Min Demand", f"{hist_df['Demand'].min():,.0f}")
+                st.metric("Ελάχιστη Ζήτηση", f"{hist_df['Demand'].min():,.0f}")
             with col4:
-                st.metric("Std Deviation", f"{hist_df['Demand'].std():,.0f}")
+                st.metric("Τυπική Απόκλιση", f"{hist_df['Demand'].std():,.0f}")
 
-            st.subheader("Year-over-Year Comparison")
+            st.subheader("Σύγκριση Ετών")
             hist_df['Year'] = hist_df['Date'].dt.year
             hist_df['Month'] = hist_df['Date'].dt.month
 
@@ -265,21 +247,21 @@ def main():
                     mode='lines+markers'
                 ))
             fig_yoy.update_layout(
-                title='Demand by Month (Year Comparison)',
-                xaxis_title='Month',
-                yaxis_title='Cases',
+                title='Ζήτηση ανά Μήνα (Σύγκριση Ετών)',
+                xaxis_title='Μήνας',
+                yaxis_title='Κιβώτια',
                 xaxis=dict(tickmode='array', tickvals=list(range(1,13)),
-                          ticktext=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'])
+                          ticktext=['Ιαν','Φεβ','Μαρ','Απρ','Μάι','Ιουν','Ιουλ','Αυγ','Σεπ','Οκτ','Νοε','Δεκ'])
             )
             st.plotly_chart(fig_yoy, use_container_width=True)
 
-            st.subheader("Monthly Summary")
+            st.subheader("Μηνιαία Σύνοψη")
             st.dataframe(pivot.round(0), use_container_width=True)
         else:
-            st.warning("No historical data available")
+            st.warning("Δεν υπάρχουν ιστορικά δεδομένα")
 
     with tab2:
-        st.subheader("Demand Forecast")
+        st.subheader("Πρόβλεψη Ζήτησης")
 
         if len(hist_df) >= 6:
             forecast, rmse, model = forecast_demand(hist_df['Demand'].values, forecast_months)
@@ -298,13 +280,13 @@ def main():
 
                 fig.add_trace(go.Scatter(
                     x=hist_df['Date'], y=hist_df['Demand'],
-                    name='Historical', mode='lines+markers',
+                    name='Ιστορικό', mode='lines+markers',
                     line=dict(color='blue')
                 ))
 
                 fig.add_trace(go.Scatter(
                     x=forecast_df['Date'], y=forecast_df['Forecast'],
-                    name='Forecast', mode='lines+markers',
+                    name='Πρόβλεψη', mode='lines+markers',
                     line=dict(color='red', dash='dash')
                 ))
 
@@ -317,38 +299,38 @@ def main():
                     fill='toself',
                     fillcolor='rgba(255,0,0,0.1)',
                     line=dict(color='rgba(255,0,0,0)'),
-                    name='95% CI'
+                    name='95% Διάστημα Εμπιστοσύνης'
                 ))
 
                 fig.update_layout(
-                    title=f'{forecast_months}-Month Demand Forecast',
-                    xaxis_title='Date',
-                    yaxis_title='Cases'
+                    title=f'Πρόβλεψη Ζήτησης {forecast_months} Μηνών',
+                    xaxis_title='Ημερομηνία',
+                    yaxis_title='Κιβώτια'
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    st.metric("Next Month Forecast", f"{forecast[0]:,.0f}")
+                    st.metric("Πρόβλεψη Επόμενου Μήνα", f"{forecast[0]:,.0f}")
                 with col2:
-                    st.metric(f"Total {forecast_months}m Forecast", f"{forecast.sum():,.0f}")
+                    st.metric(f"Σύνολο {forecast_months}μ", f"{forecast.sum():,.0f}")
                 with col3:
-                    st.metric("Forecast RMSE", f"{rmse:,.0f}")
+                    st.metric("RMSE Πρόβλεψης", f"{rmse:,.0f}")
                 with col4:
                     safety = calculate_safety_stock(hist_df['Demand'].values, service_level)
                     st.metric("Safety Stock", f"{safety:,.0f}")
 
-                st.subheader("Forecast Details")
-                forecast_df['Month'] = forecast_df['Date'].dt.strftime('%Y-%m')
-                forecast_df['Forecast'] = forecast_df['Forecast'].round(0).astype(int)
-                st.dataframe(forecast_df[['Month', 'Forecast']], use_container_width=True)
+                st.subheader("Λεπτομέρειες Πρόβλεψης")
+                forecast_df['Μήνας'] = forecast_df['Date'].dt.strftime('%Y-%m')
+                forecast_df['Πρόβλεψη'] = forecast_df['Forecast'].round(0).astype(int)
+                st.dataframe(forecast_df[['Μήνας', 'Πρόβλεψη']], use_container_width=True)
             else:
-                st.warning("Could not generate forecast")
+                st.warning("Αδυναμία δημιουργίας πρόβλεψης")
         else:
-            st.warning("Need at least 6 months of data for forecasting")
+            st.warning("Απαιτούνται τουλάχιστον 6 μήνες δεδομένων")
 
     with tab3:
-        st.subheader("Stock Position Analysis")
+        st.subheader("Ανάλυση Θέσης Αποθέματος")
 
         if not stock_match.empty:
             stock_row = stock_match.iloc[0]
@@ -356,17 +338,17 @@ def main():
             col1, col2 = st.columns(2)
 
             with col1:
-                st.markdown("### Current Stock Levels")
-                st.metric("Unrestricted Stock", f"{int(stock_row['Unrestricted Stock']):,}")
-                st.metric("Available Quantity", f"{int(stock_row['Available Quantity']):,}")
-                st.metric("Quality Inspection", f"{int(stock_row['Quality Inspection Stock']):,}")
+                st.markdown("### Τρέχοντα Επίπεδα Αποθέματος")
+                st.metric("Διαθέσιμο Απόθεμα", f"{int(stock_row['Unrestricted Stock']):,}")
+                st.metric("Καθαρή Διαθεσιμότητα", f"{int(stock_row['Available Quantity']):,}")
+                st.metric("Ποιοτικός Έλεγχος", f"{int(stock_row['Quality Inspection Stock']):,}")
 
             with col2:
-                st.markdown("### Orders & Deliveries")
-                st.metric("Customer Orders", f"{int(stock_row['Cust.Ord.Total Qty']):,}")
-                st.metric("Confirmed Orders", f"{int(stock_row['Cust.Conf.Total Qty']):,}")
-                st.metric("On Deliveries", f"{int(stock_row['Quantities on Deliveries']):,}")
-                st.metric("Goods Receipts", f"{int(stock_row['Goods Receipts Total Qty']):,}")
+                st.markdown("### Παραγγελίες & Παραδόσεις")
+                st.metric("Παραγγελίες Πελατών", f"{int(stock_row['Cust.Ord.Total Qty']):,}")
+                st.metric("Επιβεβαιωμένες Παραγγελίες", f"{int(stock_row['Cust.Conf.Total Qty']):,}")
+                st.metric("Σε Παράδοση", f"{int(stock_row['Quantities on Deliveries']):,}")
+                st.metric("Παραλαβές", f"{int(stock_row['Goods Receipts Total Qty']):,}")
 
             if len(hist_df) > 0:
                 avg_monthly = hist_df['Demand'].mean()
@@ -375,21 +357,21 @@ def main():
                 if avg_monthly > 0:
                     months_of_stock = current / avg_monthly
 
-                    st.markdown("### Stock Coverage")
+                    st.markdown("### Κάλυψη Αποθέματος")
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.metric("Avg Monthly Demand", f"{avg_monthly:,.0f}")
+                        st.metric("Μέση Μηνιαία Ζήτηση", f"{avg_monthly:,.0f}")
                     with col2:
-                        st.metric("Months of Stock", f"{months_of_stock:.1f}")
+                        st.metric("Μήνες Αποθέματος", f"{months_of_stock:.1f}")
                     with col3:
                         safety = calculate_safety_stock(hist_df['Demand'].values, service_level)
                         reorder_point = avg_monthly + safety
-                        st.metric("Reorder Point", f"{reorder_point:,.0f}")
+                        st.metric("Σημείο Αναπαραγγελίας", f"{reorder_point:,.0f}")
 
                     fig = go.Figure(go.Indicator(
                         mode="gauge+number",
                         value=months_of_stock,
-                        title={'text': "Months of Stock Coverage"},
+                        title={'text': "Μήνες Κάλυψης Αποθέματος"},
                         gauge={
                             'axis': {'range': [0, 6]},
                             'bar': {'color': "darkblue"},
@@ -408,13 +390,13 @@ def main():
                     ))
                     st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("No current stock data found for this product")
+            st.info("Δεν βρέθηκαν δεδομένα αποθέματος για αυτό το προϊόν")
 
     with tab4:
-        st.subheader("Product Comparison")
+        st.subheader("Σύγκριση Προϊόντων")
 
         compare_products = st.multiselect(
-            "Select products to compare",
+            "Επιλογή προϊόντων για σύγκριση",
             product_options,
             default=[selected_product]
         )
@@ -435,14 +417,14 @@ def main():
                 ))
 
             fig.update_layout(
-                title='Product Demand Comparison',
-                xaxis_title='Date',
-                yaxis_title='Cases'
+                title='Σύγκριση Ζήτησης Προϊόντων',
+                xaxis_title='Ημερομηνία',
+                yaxis_title='Κιβώτια'
             )
             st.plotly_chart(fig, use_container_width=True)
 
     # --- SUMMARY TABLE ---
-    st.header("All Products Summary")
+    st.header("Σύνοψη Όλων των Προϊόντων")
 
     summary_data = []
     for _, row in data_df.iterrows():
@@ -463,24 +445,24 @@ def main():
 
         summary_data.append({
             'SKU': sku,
-            'Product': str(row['Product_Name'])[:35],
-            'Category': row['Category'],
-            'Current Stock': current_stock,
-            'Avg Monthly': avg_demand,
-            'Latest Month': latest,
-            'Next 3m Forecast': next_3m,
-            'Months Coverage': current_stock / avg_demand if current_stock and avg_demand and avg_demand > 0 else None
+            'Προϊόν': str(row['Product_Name'])[:35],
+            'Κατηγορία': row['Category'],
+            'Τρέχον Απόθεμα': current_stock,
+            'Μέση Μηνιαία': avg_demand,
+            'Τελευταίος Μήνας': latest,
+            'Πρόβλεψη 3μ': next_3m,
+            'Μήνες Κάλυψης': current_stock / avg_demand if current_stock and avg_demand and avg_demand > 0 else None
         })
 
     summary_df = pd.DataFrame(summary_data)
 
     st.dataframe(
         summary_df.style.format({
-            'Current Stock': lambda x: f"{int(x):,}" if pd.notna(x) else "-",
-            'Avg Monthly': lambda x: f"{x:,.0f}" if pd.notna(x) else "-",
-            'Latest Month': lambda x: f"{x:,.0f}" if pd.notna(x) else "-",
-            'Next 3m Forecast': lambda x: f"{x:,.0f}" if pd.notna(x) else "-",
-            'Months Coverage': lambda x: f"{x:.1f}" if pd.notna(x) else "-"
+            'Τρέχον Απόθεμα': lambda x: f"{int(x):,}" if pd.notna(x) else "-",
+            'Μέση Μηνιαία': lambda x: f"{x:,.0f}" if pd.notna(x) else "-",
+            'Τελευταίος Μήνας': lambda x: f"{x:,.0f}" if pd.notna(x) else "-",
+            'Πρόβλεψη 3μ': lambda x: f"{x:,.0f}" if pd.notna(x) else "-",
+            'Μήνες Κάλυψης': lambda x: f"{x:.1f}" if pd.notna(x) else "-"
         }),
         use_container_width=True,
         height=400
