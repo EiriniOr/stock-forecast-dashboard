@@ -563,21 +563,6 @@ def main():
     # Sort by our order recommendation (highest first)
     summary_df = summary_df.sort_values('🤖 Παραγγελία 7ημ', ascending=False)
 
-    # Quick selector
-    product_from_table = st.selectbox(
-        "Γρήγορη επιλογή:",
-        options=summary_df['Προϊόν'].tolist(),
-        index=None,
-        placeholder="Επίλεξε προϊόν...",
-        key="table_selector"
-    )
-
-    if product_from_table:
-        selected_row = summary_df[summary_df['Προϊόν'] == product_from_table].iloc[0]
-        if selected_row['Material'] != st.session_state.selected_material:
-            st.session_state.selected_material = selected_row['Material']
-            st.rerun()
-
     st.dataframe(
         summary_df.style.format({
             'Απόθεμα': lambda x: f"{x:,}" if pd.notna(x) else "—",
@@ -589,6 +574,7 @@ def main():
     )
 
     st.caption("🤖 = Δική μας πρόβλεψη | 📋 = Υπάρχον σύστημα | Ταξινόμηση: Μεγαλύτερη ανάγκη παραγγελίας πρώτα")
+    st.caption("v2.1 - 01/01/2026")
 
 if __name__ == "__main__":
     main()
