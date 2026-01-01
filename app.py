@@ -142,6 +142,10 @@ def main():
         st.error(f"Σφάλμα: {e}")
         return
 
+    # Initialize session state for selected product
+    if 'selected_sku' not in st.session_state:
+        st.session_state.selected_sku = None
+
     # --- PRODUCT SELECTION ---
     st.markdown("---")
     col1, col2, col3 = st.columns([2, 2, 1])
@@ -159,8 +163,16 @@ def main():
         lambda x: f"{x['SKU_Short']} - {str(x['Product_Name'])[:50]}", axis=1
     ).tolist()
 
+    # Find default index - use session state if set from table click
+    default_idx = 0
+    if st.session_state.selected_sku:
+        for i, opt in enumerate(product_options):
+            if opt.startswith(st.session_state.selected_sku):
+                default_idx = i
+                break
+
     with col2:
-        selected_product = st.selectbox("Προϊόν", product_options)
+        selected_product = st.selectbox("Προϊόν", product_options, index=default_idx)
 
     with col3:
         forecast_months = st.selectbox("Μήνες πρόβλεψης", [1, 3, 6, 12], index=1)
@@ -336,14 +348,26 @@ def main():
 
     summary_df = pd.DataFrame(summary_data)
 
-    st.dataframe(
+    st.caption("👆 Κάνε κλικ σε μια γραμμή για να δεις την ανάλυση")
+
+    selection = st.dataframe(
         summary_df.style.format({
             'Τρέχον': lambda x: f"{x:,}" if pd.notna(x) else "—",
             'Σύσταση 3μ': lambda x: f"{x:,}" if pd.notna(x) else "—",
         }),
         use_container_width=True,
-        height=400
+        height=400,
+        on_select="rerun",
+        selection_mode="single-row"
     )
+
+    # Handle row selection
+    if selection and selection.selection and selection.selection.rows:
+        selected_row_idx = selection.selection.rows[0]
+        selected_sku = summary_df.iloc[selected_row_idx]['SKU']
+        if selected_sku != st.session_state.selected_sku:
+            st.session_state.selected_sku = selected_sku
+            st.rerun()
 
     st.caption("✅ Επαρκές απόθεμα | 🔴 Ανεπαρκές απόθεμα | ⚠️ Λίγα δεδομένα | ⚡ Μέτρια αξιοπιστία")
 
