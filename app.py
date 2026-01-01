@@ -244,8 +244,8 @@ def main():
         show_discontinued = st.checkbox("Εμφάνιση διακοπτόμενων προϊόντων", value=False,
                                         help="Προϊόντα με μόνο αρνητικές τιμές (επιστροφές)")
     with col_filter2:
-        show_old = st.checkbox("Εμφάνιση παλιών προϊόντων", value=False,
-                               help="Προϊόντα χωρίς πωλήσεις τον τελευταίο χρόνο")
+        show_old = st.checkbox("Εμφάνιση παλιών προϊόντων (χωρίς πωλήσεις 12 μήνες)", value=False,
+                               help="Προϊόντα χωρίς πωλήσεις τους τελευταίους 12 μήνες")
 
     # Apply filters
     working_df = data_df.copy()
