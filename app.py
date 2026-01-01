@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression
+from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -61,8 +62,6 @@ def load_data(uploaded_file):
 def forecast_demand(historical_data, periods_ahead=12):
     """Forecast demand using only positive values (negative = returns)"""
     data = pd.Series(historical_data).dropna()
-
-    # Use only positive values for forecasting (negatives are returns)
     positive_data = data[data > 0]
 
     if len(positive_data) < 6:
@@ -81,7 +80,6 @@ def forecast_demand(historical_data, periods_ahead=12):
     residuals = y - fitted
     rmse = np.sqrt(np.mean(residuals**2))
 
-    # R² and CV for reliability
     ss_res = np.sum(residuals**2)
     ss_tot = np.sum((y - np.mean(y))**2)
     r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
@@ -91,10 +89,7 @@ def forecast_demand(historical_data, periods_ahead=12):
         monthly_avg = []
         for m in range(12):
             month_vals = [positive_data.iloc[i] for i in range(m, len(positive_data), 12) if i < len(positive_data)]
-            if month_vals:
-                monthly_avg.append(np.mean(month_vals))
-            else:
-                monthly_avg.append(np.mean(positive_data))
+            monthly_avg.append(np.mean(month_vals) if month_vals else np.mean(positive_data))
 
         overall_avg = np.mean(positive_data)
         seasonal_factors = [m / overall_avg if overall_avg > 0 else 1 for m in monthly_avg]
@@ -105,22 +100,17 @@ def forecast_demand(historical_data, periods_ahead=12):
             forecast[i] *= seasonal_factors[month_idx]
 
     forecast = np.maximum(forecast, 0)
-
     reliability = {'r_squared': r_squared, 'cv': cv, 'rmse': rmse}
     return forecast, rmse, reliability
 
 def calculate_safety_stock(historical_data, service_level=0.95):
-    """Calculate safety stock using only positive demand values"""
     data = pd.Series(historical_data).dropna()
     positive_data = data[data > 0]
-
     if len(positive_data) < 3:
         return 0
-
     z_scores = {0.90: 1.28, 0.95: 1.65, 0.99: 2.33}
     z = z_scores.get(service_level, 1.65)
-    std_dev = positive_data.std()
-    return max(0, z * std_dev)
+    return max(0, z * positive_data.std())
 
 def get_reliability_level(r2, cv):
     if r2 >= 0.7 and cv < 30:
@@ -130,22 +120,14 @@ def get_reliability_level(r2, cv):
     else:
         return "low", "🔴", "Χαμηλή αξιοπιστία"
 
-def analyze_product_pattern(historical_data):
-    """Analyze if product has mostly returns (negative) or sales (positive)"""
+def calculate_expected_returns(historical_data):
+    """Calculate expected returns from negative values"""
     data = pd.Series(historical_data).dropna()
-    if len(data) == 0:
-        return "no_data", "Χωρίς δεδομένα"
-
-    neg_count = (data < 0).sum()
-    pos_count = (data > 0).sum()
-    total = len(data)
-
-    if neg_count > pos_count:
-        return "returns", f"⚠️ Κυρίως επιστροφές ({neg_count}/{total} αρνητικά)"
-    elif pos_count < 6:
-        return "low_data", f"Λίγα δεδομένα πωλήσεων ({pos_count} μήνες)"
-    else:
-        return "normal", None
+    negative_data = data[data < 0]
+    if len(negative_data) == 0:
+        return 0
+    # Average monthly returns (as positive number)
+    return abs(negative_data.mean())
 
 # --- MAIN APP ---
 def main():
@@ -167,7 +149,7 @@ def main():
         st.error(f"Σφάλμα: {e}")
         return
 
-    # Initialize session state for selected product
+    # Initialize session state
     if 'selected_sku' not in st.session_state:
         st.session_state.selected_sku = None
 
@@ -188,7 +170,7 @@ def main():
         lambda x: f"{x['SKU_Short']} - {str(x['Product_Name'])[:50]}", axis=1
     ).tolist()
 
-    # Find default index - use session state if set from table click
+    # Find default index from session state
     default_idx = 0
     if st.session_state.selected_sku:
         for i, opt in enumerate(product_options):
@@ -219,156 +201,183 @@ def main():
     dates = pd.to_datetime([f"{d}-01" for d in date_columns])
     hist_df = pd.DataFrame({'Date': dates, 'Demand': historical}).dropna()
 
+    # Current month for highlighting
+    current_month = datetime.now().month
+
     # --- MAIN ANALYSIS ---
     st.markdown("---")
     st.subheader(f"📊 {product_row['Product_Name']}")
 
-    # Check product pattern (returns vs sales)
-    pattern, pattern_msg = analyze_product_pattern(hist_df['Demand'].values)
+    # Calculate metrics
+    positive_data = hist_df[hist_df['Demand'] > 0]['Demand']
+    negative_data = hist_df[hist_df['Demand'] < 0]['Demand']
+    has_enough_data = len(positive_data) >= 6
+    expected_returns = calculate_expected_returns(hist_df['Demand'].values) * forecast_months
 
-    if pattern == "returns":
-        st.error(pattern_msg)
-        st.info("Αυτό το προϊόν έχει κυρίως αρνητικές τιμές (επιστροφές/πιστώσεις). Δεν είναι δυνατή η πρόβλεψη ζήτησης.")
+    # Try to forecast
+    forecast, rmse, reliability = None, None, None
+    if has_enough_data:
+        forecast, rmse, reliability = forecast_demand(hist_df['Demand'].values, forecast_months)
 
-        # Show the raw data
-        with st.expander("📋 Δες τα δεδομένα"):
-            st.dataframe(hist_df, use_container_width=True)
+    # --- METRICS ROW ---
+    if forecast is not None:
+        total_forecast = forecast.sum()
+        safety_stock = calculate_safety_stock(hist_df['Demand'].values, 0.95)
+        recommended = total_forecast + safety_stock
+        level, icon, message = get_reliability_level(reliability['r_squared'], reliability['cv'])
 
-    elif pattern == "low_data":
-        st.warning(f"⚠️ {pattern_msg}")
-        if len(hist_df) > 0:
-            positive_avg = hist_df[hist_df['Demand'] > 0]['Demand'].mean()
-            if pd.notna(positive_avg):
-                fallback = positive_avg * forecast_months * 1.3
-                st.info(f"Εκτίμηση με buffer 30%: **{fallback:,.0f}** για {forecast_months} μήνες")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("🎯 Προτεινόμενο Απόθεμα", f"{recommended:,.0f}")
+        with col2:
+            st.metric("📈 Πρόβλεψη Ζήτησης", f"{total_forecast:,.0f}")
+        with col3:
+            st.metric("🛡️ Safety Stock", f"{safety_stock:,.0f}")
+        with col4:
+            if current_stock is not None:
+                diff = current_stock - recommended
+                st.metric("📦 Τρέχον Απόθεμα", f"{int(current_stock):,}", f"{diff:+,.0f}")
+            else:
+                st.metric("📦 Τρέχον Απόθεμα", "—")
+        with col5:
+            if expected_returns > 0:
+                st.metric("↩️ Αναμ. Επιστροφές", f"+{expected_returns:,.0f}")
+            else:
+                st.metric("↩️ Αναμ. Επιστροφές", "0")
+
+        # Reliability
+        if level == "high":
+            st.success(f"{icon} {message} — R²={reliability['r_squared']:.2f}, CV={reliability['cv']:.0f}%")
+        elif level == "medium":
+            st.warning(f"{icon} {message} — Προτείνεται buffer +15-20% — R²={reliability['r_squared']:.2f}, CV={reliability['cv']:.0f}%")
+        else:
+            st.error(f"{icon} {message} — Προτείνεται buffer +30-50% — R²={reliability['r_squared']:.2f}, CV={reliability['cv']:.0f}%")
+
+        st.caption("R² = πόσο καλά ταιριάζει το μοντέλο (>0.7 καλό) | CV = μεταβλητότητα ζήτησης (<30% σταθερή)")
 
     else:
-        # Normal product with enough positive data
-        positive_hist = hist_df[hist_df['Demand'] > 0].copy()
+        # Not enough data for forecast - show what we have
+        st.warning(f"⚠️ Λίγα δεδομένα για πρόβλεψη ({len(positive_data)} θετικοί μήνες, χρειάζονται 6+)")
 
-        forecast, rmse, reliability = forecast_demand(hist_df['Demand'].values, forecast_months)
-        safety_stock = calculate_safety_stock(hist_df['Demand'].values, 0.95)
-
-        if forecast is not None:
-            total_forecast = forecast.sum()
-            recommended = total_forecast + safety_stock
-            level, icon, message = get_reliability_level(reliability['r_squared'], reliability['cv'])
-
-            # Key metrics
-            col1, col2, col3, col4 = st.columns(4)
-
-            with col1:
-                st.metric("🎯 Προτεινόμενο Απόθεμα", f"{recommended:,.0f}")
-
-            with col2:
-                st.metric("📈 Πρόβλεψη Ζήτησης", f"{total_forecast:,.0f}")
-
-            with col3:
-                st.metric("🛡️ Safety Stock", f"{safety_stock:,.0f}")
-
-            with col4:
-                if current_stock is not None:
-                    diff = current_stock - recommended
-                    st.metric("📦 Τρέχον Απόθεμα", f"{int(current_stock):,}", f"{diff:+,.0f}")
-                else:
-                    st.metric("📦 Τρέχον Απόθεμα", "—")
-
-            # Reliability box
-            if level == "high":
-                st.success(f"{icon} {message} — R²={reliability['r_squared']:.2f}, CV={reliability['cv']:.0f}%")
-            elif level == "medium":
-                st.warning(f"{icon} {message} — Προτείνεται buffer +15-20% — R²={reliability['r_squared']:.2f}, CV={reliability['cv']:.0f}%")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if current_stock is not None:
+                st.metric("📦 Τρέχον Απόθεμα", f"{int(current_stock):,}")
             else:
-                st.error(f"{icon} {message} — Προτείνεται buffer +30-50% — R²={reliability['r_squared']:.2f}, CV={reliability['cv']:.0f}%")
+                st.metric("📦 Τρέχον Απόθεμα", "—")
+        with col2:
+            if len(positive_data) > 0:
+                avg = positive_data.mean()
+                st.metric("📊 Μέσος Όρος Πωλήσεων", f"{avg:,.0f}/μήνα")
+        with col3:
+            if expected_returns > 0:
+                st.metric("↩️ Αναμ. Επιστροφές", f"+{expected_returns:,.0f}")
 
-            st.caption("R² = πόσο καλά ταιριάζει το μοντέλο (>0.7 καλό) | CV = μεταβλητότητα ζήτησης (<30% σταθερή)")
+    # --- CHART: Always show historical data ---
+    st.markdown("---")
 
-            # --- COMBINED CHART: Historical + Forecast ---
-            st.markdown("---")
+    fig = go.Figure()
 
-            # Prepare forecast dates
-            forecast_dates = pd.date_range(
-                start=hist_df['Date'].max() + pd.DateOffset(months=1),
-                periods=forecast_months, freq='MS'
-            )
+    # Historical data - color by year
+    if len(hist_df) > 0:
+        hist_df['Year'] = hist_df['Date'].dt.year
+        hist_df['Month'] = hist_df['Date'].dt.month
+        years = sorted(hist_df['Year'].unique())
+        colors = {'2021': '#636EFA', '2022': '#EF553B', '2023': '#00CC96', '2024': '#AB63FA', '2025': '#FFA15A', '2026': '#19D3F3'}
 
-            fig = go.Figure()
-
-            # Historical data - color by year, show ALL values (including negative)
-            hist_df['Year'] = hist_df['Date'].dt.year
-            years = hist_df['Year'].unique()
-            colors = {'2021': '#636EFA', '2022': '#EF553B', '2023': '#00CC96', '2024': '#AB63FA', '2025': '#FFA15A'}
-
-            for year in sorted(years):
-                year_data = hist_df[hist_df['Year'] == year]
-                color = colors.get(str(year), '#1f77b4')
-                fig.add_trace(go.Scatter(
-                    x=year_data['Date'],
-                    y=year_data['Demand'],
-                    name=f'{year}',
-                    mode='lines+markers',
-                    line=dict(color=color, width=2),
-                    marker=dict(size=6)
-                ))
-
-            # Forecast
+        for year in years:
+            year_data = hist_df[hist_df['Year'] == year]
+            color = colors.get(str(year), '#1f77b4')
             fig.add_trace(go.Scatter(
-                x=forecast_dates,
-                y=forecast,
-                name='Πρόβλεψη',
+                x=year_data['Date'],
+                y=year_data['Demand'],
+                name=f'{year}',
                 mode='lines+markers',
-                line=dict(color='#d62728', width=3, dash='dash'),
-                marker=dict(size=8, symbol='diamond')
+                line=dict(color=color, width=2),
+                marker=dict(size=6)
             ))
 
-            # Confidence interval (±1.5 RMSE)
-            upper = forecast + 1.5 * rmse
-            lower = np.maximum(forecast - 1.5 * rmse, 0)
-
+        # Highlight current month values with vertical markers
+        current_month_data = hist_df[hist_df['Month'] == current_month]
+        if len(current_month_data) > 0:
             fig.add_trace(go.Scatter(
-                x=list(forecast_dates) + list(forecast_dates[::-1]),
-                y=list(upper) + list(lower[::-1]),
-                fill='toself',
-                fillcolor='rgba(214, 39, 40, 0.15)',
-                line=dict(color='rgba(255,255,255,0)'),
-                name='Εύρος αβεβαιότητας',
+                x=current_month_data['Date'],
+                y=current_month_data['Demand'],
+                name=f'Τρέχων μήνας ({current_month})',
+                mode='markers',
+                marker=dict(size=14, symbol='circle-open', color='black', line=dict(width=3)),
                 showlegend=True
             ))
 
-            # Add zero line if there are negative values
-            if (hist_df['Demand'] < 0).any():
-                fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+    # Add forecast if available
+    if forecast is not None:
+        forecast_dates = pd.date_range(
+            start=hist_df['Date'].max() + pd.DateOffset(months=1),
+            periods=forecast_months, freq='MS'
+        )
 
-            fig.update_layout(
-                title='Ιστορική Ζήτηση & Πρόβλεψη',
-                xaxis_title='',
-                yaxis_title='Κιβώτια',
-                height=400,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                hovermode='x unified'
-            )
-            st.plotly_chart(fig, use_container_width=True)
+        fig.add_trace(go.Scatter(
+            x=forecast_dates,
+            y=forecast,
+            name='Πρόβλεψη',
+            mode='lines+markers',
+            line=dict(color='#d62728', width=3, dash='dash'),
+            marker=dict(size=8, symbol='diamond')
+        ))
 
-            # Note about negative values
-            neg_count = (hist_df['Demand'] < 0).sum()
-            if neg_count > 0:
-                st.caption(f"ℹ️ Αρνητικές τιμές ({neg_count} μήνες) = επιστροφές/πιστώσεις. Η πρόβλεψη βασίζεται μόνο στις θετικές πωλήσεις.")
+        # Confidence interval
+        upper = forecast + 1.5 * rmse
+        lower = np.maximum(forecast - 1.5 * rmse, 0)
+        fig.add_trace(go.Scatter(
+            x=list(forecast_dates) + list(forecast_dates[::-1]),
+            y=list(upper) + list(lower[::-1]),
+            fill='toself',
+            fillcolor='rgba(214, 39, 40, 0.15)',
+            line=dict(color='rgba(255,255,255,0)'),
+            name='Εύρος αβεβαιότητας',
+            showlegend=True
+        ))
 
-            # Monthly forecast breakdown
-            st.markdown("**Ανάλυση πρόβλεψης ανά μήνα:**")
-            monthly_df = pd.DataFrame({
-                'Μήνας': forecast_dates.strftime('%b %Y'),
-                'Πρόβλεψη': forecast.round(0).astype(int),
-                'Με Safety Stock': (forecast + safety_stock/forecast_months).round(0).astype(int)
-            })
-            st.dataframe(monthly_df, use_container_width=True, hide_index=True)
+    # Zero line if there are negative values
+    if len(hist_df) > 0 and (hist_df['Demand'] < 0).any():
+        fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+
+    title = 'Ιστορική Ζήτηση & Πρόβλεψη' if forecast is not None else 'Ιστορική Ζήτηση'
+    fig.update_layout(
+        title=title,
+        xaxis_title='',
+        yaxis_title='Κιβώτια',
+        height=400,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hovermode='x unified'
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Notes
+    neg_count = (hist_df['Demand'] < 0).sum() if len(hist_df) > 0 else 0
+    if neg_count > 0:
+        st.caption(f"ℹ️ Αρνητικές τιμές ({neg_count} μήνες) = επιστροφές. Αναμένονται ~{expected_returns/forecast_months:,.0f}/μήνα επιστροφές που θα αυξήσουν το απόθεμα.")
+
+    # Monthly forecast breakdown (only if forecast exists)
+    if forecast is not None:
+        st.markdown("**Ανάλυση πρόβλεψης ανά μήνα:**")
+        safety_stock = calculate_safety_stock(hist_df['Demand'].values, 0.95)
+        forecast_dates = pd.date_range(
+            start=hist_df['Date'].max() + pd.DateOffset(months=1),
+            periods=forecast_months, freq='MS'
+        )
+        monthly_df = pd.DataFrame({
+            'Μήνας': forecast_dates.strftime('%b %Y'),
+            'Πρόβλεψη': forecast.round(0).astype(int),
+            'Με Safety Stock': (forecast + safety_stock/forecast_months).round(0).astype(int)
+        })
+        st.dataframe(monthly_df, use_container_width=True, hide_index=True)
 
     # --- ALL PRODUCTS SUMMARY ---
     st.markdown("---")
     st.subheader("📋 Όλα τα Προϊόντα")
-    st.caption("Κάνε κλικ σε ένα όνομα για να δεις την ανάλυση")
 
-    # Build summary with clickable product names
+    # Build summary
     summary_data = []
     for idx, row in filtered_df.iterrows():
         hist = pd.Series(row[date_columns].values.astype(float)).dropna()
@@ -378,12 +387,11 @@ def main():
         stock_row = stock_df[stock_df['Material Code'].str.contains(sku, na=False)]
         curr = stock_row.iloc[0]['Unrestricted Stock'] if not stock_row.empty else None
 
-        # Check pattern
-        pattern, _ = analyze_product_pattern(hist.values)
+        positive_hist = hist[hist > 0]
+        negative_hist = hist[hist < 0]
+        exp_ret = abs(negative_hist.mean()) * 3 if len(negative_hist) > 0 else 0
 
-        if pattern == "returns":
-            rec, status, icon = None, "↩️", "↩️"
-        elif len(hist[hist > 0]) >= 6:
+        if len(positive_hist) >= 6:
             fc, _, rel = forecast_demand(hist.values, 3)
             if fc is not None:
                 rec = fc.sum() + calculate_safety_stock(hist.values, 0.95)
@@ -392,48 +400,50 @@ def main():
             else:
                 rec, status, icon = None, "—", "⚠️"
         else:
-            rec, status, icon = None, "—", "⚠️"
+            rec, status, icon = None, "⚠️", "⚠️"
 
         summary_data.append({
-            'idx': idx,
             'Κατάσταση': status,
             'SKU': sku,
             'Προϊόν': product_name,
             'Τρέχον': int(curr) if curr else None,
             'Σύσταση 3μ': int(rec) if rec else None,
+            'Επιστρ.': int(exp_ret) if exp_ret > 0 else None,
             'Αξιοπ.': icon
         })
 
-    # Display as clickable list
-    cols = st.columns([0.5, 1, 3, 1.2, 1.2, 0.5])
-    cols[0].markdown("**Στ.**")
-    cols[1].markdown("**SKU**")
-    cols[2].markdown("**Προϊόν**")
-    cols[3].markdown("**Τρέχον**")
-    cols[4].markdown("**Σύσταση**")
-    cols[5].markdown("**Αξ.**")
+    summary_df = pd.DataFrame(summary_data)
 
-    st.markdown("<hr style='margin: 5px 0'>", unsafe_allow_html=True)
+    # Use selectbox in a table-like display for product selection
+    st.caption("👆 Επίλεξε προϊόν από τον πίνακα για να δεις την ανάλυση")
 
-    # Create scrollable container
-    container = st.container(height=400)
+    # Product selector from table
+    product_from_table = st.selectbox(
+        "Γρήγορη επιλογή από πίνακα:",
+        options=summary_df['Προϊόν'].tolist(),
+        index=None,
+        placeholder="Επίλεξε προϊόν...",
+        key="table_selector"
+    )
 
-    with container:
-        for item in summary_data:
-            cols = st.columns([0.5, 1, 3, 1.2, 1.2, 0.5])
-            cols[0].write(item['Κατάσταση'])
-            cols[1].write(item['SKU'])
+    if product_from_table:
+        # Find the SKU for this product
+        selected_row = summary_df[summary_df['Προϊόν'] == product_from_table].iloc[0]
+        if selected_row['SKU'] != st.session_state.selected_sku:
+            st.session_state.selected_sku = selected_row['SKU']
+            st.rerun()
 
-            # Clickable product name
-            if cols[2].button(item['Προϊόν'], key=f"btn_{item['SKU']}", use_container_width=True):
-                st.session_state.selected_sku = item['SKU']
-                st.rerun()
+    st.dataframe(
+        summary_df.style.format({
+            'Τρέχον': lambda x: f"{x:,}" if pd.notna(x) else "—",
+            'Σύσταση 3μ': lambda x: f"{x:,}" if pd.notna(x) else "—",
+            'Επιστρ.': lambda x: f"+{x:,}" if pd.notna(x) and x > 0 else "—",
+        }),
+        use_container_width=True,
+        height=350
+    )
 
-            cols[3].write(f"{item['Τρέχον']:,}" if item['Τρέχον'] else "—")
-            cols[4].write(f"{item['Σύσταση 3μ']:,}" if item['Σύσταση 3μ'] else "—")
-            cols[5].write(item['Αξιοπ.'])
-
-    st.caption("✅ Επαρκές | 🔴 Ανεπαρκές | ↩️ Επιστροφές | ⚠️ Λίγα δεδομένα | ⚡ Μέτρια αξιοπ.")
+    st.caption("✅ Επαρκές | 🔴 Ανεπαρκές | ⚠️ Λίγα δεδομένα | ⚡ Μέτρια αξιοπ. | Επιστρ. = αναμενόμενες επιστροφές 3μ")
 
 if __name__ == "__main__":
     main()
