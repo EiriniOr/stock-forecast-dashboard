@@ -17,54 +17,40 @@ MONTH_NAMES_GR = ['Ιαν', 'Φεβ', 'Μαρ', 'Απρ', 'Μαϊ', 'Ιουν', 
 
 @st.cache_data
 def load_all_data(uploaded_file):
-    """Load CD, S1P, and Cases sheets"""
+    """Load S1P and Cases sheets"""
     xl = pd.ExcelFile(uploaded_file)
-    available_sheets = xl.sheet_names
 
-    # --- CD Sheet: Stock by description ---
-    df_cd = pd.read_excel(uploaded_file, sheet_name='CD')
+    # --- S1P Sheet: Stock, descriptions, and shelf life ---
+    df_s1p = pd.read_excel(uploaded_file, sheet_name='S1P')
 
-    # Find Unrestricted column (might be named differently)
+    # Find Unrestricted Stock column
     unrestricted_col = None
-    for col in df_cd.columns:
+    for col in df_s1p.columns:
         col_lower = str(col).lower()
-        if 'unrestricted' in col_lower or 'stock' in col_lower or 'qty' in col_lower or 'ποσότητα' in col_lower:
+        if 'unrestricted' in col_lower:
             unrestricted_col = col
             break
 
     if unrestricted_col is None:
-        # Show available columns for debugging
-        raise ValueError(f"CD sheet: δεν βρέθηκε στήλη stock. Διαθέσιμες στήλες: {list(df_cd.columns)}")
-
-    # Find description column
-    desc_col = None
-    for col in df_cd.columns:
-        col_lower = str(col).lower()
-        if 'description' in col_lower or 'περιγραφή' in col_lower or 'material' in col_lower:
-            desc_col = col
-            break
-
-    if desc_col is None:
-        raise ValueError(f"CD sheet: δεν βρέθηκε στήλη description. Διαθέσιμες στήλες: {list(df_cd.columns)}")
-
-    # Aggregate stock by description
-    df_cd[unrestricted_col] = pd.to_numeric(df_cd[unrestricted_col], errors='coerce').fillna(0)
-    stock_by_desc = df_cd.groupby(desc_col)[unrestricted_col].sum().reset_index()
-    stock_by_desc.columns = ['Description', 'Stock']
-
-    # --- S1P Sheet: Check descriptions and shelf life ---
-    df_s1p = pd.read_excel(uploaded_file, sheet_name='S1P')
+        raise ValueError(f"S1P sheet: δεν βρέθηκε στήλη unrestricted. Διαθέσιμες στήλες: {list(df_s1p.columns)}")
 
     # Find description column in S1P
     s1p_desc_col = None
     for col in df_s1p.columns:
         col_lower = str(col).lower()
-        if 'description' in col_lower or 'περιγραφή' in col_lower or 'material' in col_lower:
+        if 'description' in col_lower or 'περιγραφή' in col_lower:
             s1p_desc_col = col
             break
 
     if s1p_desc_col is None:
         raise ValueError(f"S1P sheet: δεν βρέθηκε στήλη description. Διαθέσιμες στήλες: {list(df_s1p.columns)}")
+
+    # Aggregate stock by description
+    df_s1p[unrestricted_col] = pd.to_numeric(df_s1p[unrestricted_col], errors='coerce').fillna(0)
+    stock_by_desc = df_s1p.groupby(s1p_desc_col)[unrestricted_col].sum().reset_index()
+    stock_by_desc.columns = ['Description', 'Stock']
+
+    s1p_descriptions = set(df_s1p[s1p_desc_col].dropna().astype(str).str.strip().tolist())
 
     # Find shelf life column
     shelf_col = None
@@ -72,8 +58,6 @@ def load_all_data(uploaded_file):
         if 'shelf' in str(col).lower() or 'λήξη' in str(col).lower() or 'expir' in str(col).lower():
             shelf_col = col
             break
-
-    s1p_descriptions = set(df_s1p[s1p_desc_col].dropna().astype(str).str.strip().tolist())
 
     # --- Cases Sheet: Historical data and system averages ---
     df_cases_raw = pd.read_excel(uploaded_file, sheet_name='Cases2021 2022 FC', header=None)
@@ -184,8 +168,7 @@ def main():
         st.info("Ανέβασε ένα αρχείο Excel (.xlsx) για να ξεκινήσεις")
         st.markdown("""
         **Απαιτούμενα φύλλα:**
-        - `CD` - με στήλη Unrestricted
-        - `S1P` - με περιγραφές και ημ. λήξης
+        - `S1P` - με στήλες: Unrestricted Stock, Description, Shelf Life
         - `Cases2021 2022 FC` - ιστορικά δεδομένα
         """)
         return
