@@ -1,12 +1,12 @@
 """
 Stock Forecasting Dashboard - Cloud Version
 Πίνακας Πρόβλεψης Αποθέματος
+Groups products by description (not code) for better forecasting
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from sklearn.linear_model import Ridge
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
@@ -16,7 +16,7 @@ st.set_page_config(page_title="Πρόβλεψη Αποθέματος", layout="w
 # --- DATA LOADING ---
 @st.cache_data
 def load_data(uploaded_file):
-    """Load all relevant sheets from Excel"""
+    """Load all relevant sheets from Excel and aggregate by product description"""
 
     # 1. Cases sheet - historical sales
     df_raw = pd.read_excel(uploaded_file, sheet_name='Cases2021 2022 FC', header=None)
@@ -68,14 +68,27 @@ def load_data(uploaded_file):
                      [f'extra_{i}' for i in range(len(df_sop.columns) - 10)]
     df_sop['MRDR'] = df_sop['MRDR'].astype(str).str.strip()
 
-    return data_df, stock_by_material, df_sop, date_columns
+    # ================================================================
+    # AGGREGATE BY PRODUCT DESCRIPTION
+    # ================================================================
+    # Group sales data by Product_Name (sum across all material codes)
+    agg_dict = {col: 'sum' for col in date_columns}
+    agg_dict['Category'] = 'first'
+    agg_dict['Material'] = lambda x: list(x)  # Keep list of all material codes
+
+    grouped_df = data_df.groupby('Product_Name').agg(agg_dict).reset_index()
+    grouped_df['Material_Codes'] = grouped_df['Material']
+    grouped_df['Material'] = grouped_df['Material_Codes'].apply(lambda x: x[0] if x else '')
+    grouped_df['Num_Codes'] = grouped_df['Material_Codes'].apply(len)
+
+    return grouped_df, stock_by_material, df_sop, date_columns, data_df
 
 
 # --- TIME SERIES FORECASTING ---
 def holt_winters_forecast(data, alpha=0.3, beta=0.1, gamma=0.2, season_length=12, forecast_periods=1):
     """
     Holt-Winters Triple Exponential Smoothing
-    Captures: Level + Trend + Seasonality from 2024/2025 data
+    Captures: Level + Trend + Seasonality
     """
     n = len(data)
     if n < season_length + 2:
@@ -119,13 +132,11 @@ def holt_winters_forecast(data, alpha=0.3, beta=0.1, gamma=0.2, season_length=12
 def forecast_demand(historical_monthly, current_month):
     """
     Forecast daily demand using time series + seasonality
-    Returns forecasts for 1 day, 7 days, 14 days
     """
     data = pd.Series(historical_monthly).dropna()
     positive_data = data[data > 0]
 
     if len(positive_data) < 6:
-        # Fallback to simple average
         daily_avg = positive_data.mean() / 30 if len(positive_data) > 0 else 0
         return {
             'daily_avg': daily_avg,
@@ -136,7 +147,7 @@ def forecast_demand(historical_monthly, current_month):
             'confidence': 'low'
         }
 
-    # Try Holt-Winters for monthly forecast
+    # Try Holt-Winters
     hw_forecast, hw_metrics = holt_winters_forecast(
         positive_data.values,
         alpha=0.4, beta=0.1, gamma=0.3,
@@ -145,11 +156,8 @@ def forecast_demand(historical_monthly, current_month):
     )
 
     if hw_forecast is not None:
-        # Use forecasted monthly value, convert to daily
         next_month_forecast = hw_forecast[0]
         daily_forecast = next_month_forecast / 30
-
-        # Adjust for seasonality within the month
         monthly_avg = positive_data.mean()
         seasonal_factor = next_month_forecast / monthly_avg if monthly_avg > 0 else 1.0
 
@@ -165,7 +173,6 @@ def forecast_demand(historical_monthly, current_month):
             'mape': hw_metrics['mape']
         }
 
-    # Fallback
     daily_avg = positive_data.mean() / 30
     return {
         'daily_avg': daily_avg,
@@ -190,9 +197,53 @@ def calculate_safety_stock(historical_data, days=1, service_level=0.95):
     return max(0, z * daily_std * np.sqrt(days))
 
 
+def get_total_stock_for_product(product_row, stock_df):
+    """Get total stock across all material codes for a product"""
+    material_codes = product_row.get('Material_Codes', [product_row.get('Material', '')])
+    if isinstance(material_codes, str):
+        material_codes = [material_codes]
+
+    total_stock = 0
+    for mat in material_codes:
+        mat_str = str(mat)
+        stock_match = stock_df[stock_df['Material'] == mat_str]
+        if not stock_match.empty:
+            total_stock += int(stock_match['Unrestricted stock'].values[0])
+    return total_stock
+
+
+def get_system_prediction_for_product(product_row, sop_df):
+    """Get system prediction across all material codes for a product"""
+    material_codes = product_row.get('Material_Codes', [product_row.get('Material', '')])
+    if isinstance(material_codes, str):
+        material_codes = [material_codes]
+
+    total_daily_sales = 0
+    has_oos = False
+    found_any = False
+
+    for mat in material_codes:
+        mat_str = str(mat)
+        sop_match = sop_df[sop_df['MRDR'].str.contains(mat_str, na=False)]
+        if not sop_match.empty:
+            found_any = True
+            daily = sop_match['Avg_Daily_Sales'].values[0]
+            status = sop_match['Status'].values[0]
+            if pd.notna(daily):
+                total_daily_sales += daily
+            if status == "OOS":
+                has_oos = True
+
+    if not found_any:
+        return None, None, None
+
+    return total_daily_sales, has_oos, found_any
+
+
 # --- MAIN APP ---
 def main():
     st.title("📦 Πρόβλεψη Αποθέματος & Παραγγελίες")
+    st.caption("Ομαδοποίηση κατά περιγραφή προϊόντος (όχι κωδικό)")
 
     uploaded_file = st.file_uploader(
         "Ανέβασε το αρχείο Excel",
@@ -205,24 +256,22 @@ def main():
         return
 
     try:
-        data_df, stock_df, sop_df, date_columns = load_data(uploaded_file)
+        grouped_df, stock_df, sop_df, date_columns, raw_df = load_data(uploaded_file)
     except Exception as e:
         st.error(f"Σφάλμα: {e}")
         return
 
     # Initialize session state
-    if 'selected_material' not in st.session_state:
-        st.session_state.selected_material = None
+    if 'selected_product' not in st.session_state:
+        st.session_state.selected_product = None
 
     # --- PRODUCT FILTERING ---
-    # Identify discontinued products (all values are negative or zero)
     def is_discontinued(row):
         values = pd.Series(row[date_columns].values.astype(float)).dropna()
         if len(values) == 0:
             return True
         return (values <= 0).all()
 
-    # Identify old products (no positive values in last 12 months)
     def is_old_product_12m(row):
         recent_cols = date_columns[-12:] if len(date_columns) >= 12 else date_columns
         values = pd.Series(row[recent_cols].values.astype(float)).dropna()
@@ -230,7 +279,6 @@ def main():
             return True
         return (values <= 0).all()
 
-    # Identify products not sold in last 6 months
     def is_old_product_6m(row):
         recent_cols = date_columns[-6:] if len(date_columns) >= 6 else date_columns
         values = pd.Series(row[recent_cols].values.astype(float)).dropna()
@@ -238,10 +286,9 @@ def main():
             return True
         return (values <= 0).all()
 
-    # Mark products
-    data_df['_discontinued'] = data_df.apply(is_discontinued, axis=1)
-    data_df['_old_12m'] = data_df.apply(is_old_product_12m, axis=1)
-    data_df['_old_6m'] = data_df.apply(is_old_product_6m, axis=1)
+    grouped_df['_discontinued'] = grouped_df.apply(is_discontinued, axis=1)
+    grouped_df['_old_12m'] = grouped_df.apply(is_old_product_12m, axis=1)
+    grouped_df['_old_6m'] = grouped_df.apply(is_old_product_6m, axis=1)
 
     # --- PRODUCT SELECTION ---
     st.markdown("---")
@@ -250,16 +297,15 @@ def main():
     col_filter1, col_filter2, col_filter3 = st.columns(3)
     with col_filter1:
         show_discontinued = st.checkbox("Διακοπτόμενα", value=False,
-                                        help="Προϊόντα με μόνο αρνητικές τιμές (επιστροφές)")
+                                        help="Προϊόντα με μόνο αρνητικές τιμές")
     with col_filter2:
-        show_old_6m = st.checkbox("Χωρίς πωλήσεις 6 μήνες", value=False,
-                                  help="Προϊόντα χωρίς πωλήσεις τους τελευταίους 6 μήνες")
+        show_old_6m = st.checkbox("Χωρίς πωλήσεις 6μ", value=False,
+                                  help="Προϊόντα χωρίς πωλήσεις 6 μήνες")
     with col_filter3:
-        show_old_12m = st.checkbox("Χωρίς πωλήσεις 12 μήνες", value=False,
-                                   help="Προϊόντα χωρίς πωλήσεις τους τελευταίους 12 μήνες")
+        show_old_12m = st.checkbox("Χωρίς πωλήσεις 12μ", value=False,
+                                   help="Προϊόντα χωρίς πωλήσεις 12 μήνες")
 
-    # Apply filters
-    working_df = data_df.copy()
+    working_df = grouped_df.copy()
     if not show_discontinued:
         working_df = working_df[~working_df['_discontinued']]
     if not show_old_6m:
@@ -267,13 +313,9 @@ def main():
     if not show_old_12m:
         working_df = working_df[~working_df['_old_12m']]
 
-    # Show filter stats
-    n_total = len(data_df)
-    n_discontinued = data_df['_discontinued'].sum()
-    n_old_6m = data_df['_old_6m'].sum()
-    n_old_12m = data_df['_old_12m'].sum()
+    n_total = len(grouped_df)
     n_shown = len(working_df)
-    st.caption(f"Εμφανίζονται {n_shown}/{n_total} προϊόντα")
+    st.caption(f"Εμφανίζονται {n_shown}/{n_total} προϊόντα (ομαδοποιημένα κατά περιγραφή)")
 
     col1, col2 = st.columns([2, 3])
 
@@ -286,14 +328,15 @@ def main():
     else:
         filtered_df = working_df.reset_index(drop=True)
 
+    # Product options now show description + number of codes
     product_options = filtered_df.apply(
-        lambda x: f"{x['Material']} - {str(x['Product_Name'])[:45]}", axis=1
+        lambda x: f"{str(x['Product_Name'])[:50]} ({x['Num_Codes']} κωδ.)", axis=1
     ).tolist()
 
     default_idx = 0
-    if st.session_state.selected_material:
+    if st.session_state.selected_product:
         for i, opt in enumerate(product_options):
-            if opt.startswith(st.session_state.selected_material):
+            if st.session_state.selected_product in opt:
                 default_idx = i
                 break
 
@@ -307,23 +350,15 @@ def main():
     # Get selected product data
     selected_idx = product_options.index(selected_product)
     product_row = filtered_df.iloc[selected_idx]
-    material = product_row['Material']
+    product_name = product_row['Product_Name']
 
-    # Get current stock from S1P
-    stock_match = stock_df[stock_df['Material'] == material]
-    current_stock = int(stock_match['Unrestricted stock'].values[0]) if not stock_match.empty else 0
+    # Get TOTAL stock across all material codes
+    current_stock = get_total_stock_for_product(product_row, stock_df)
 
-    # Get existing system's prediction from SOP
-    sop_match = sop_df[sop_df['MRDR'].str.contains(material, na=False)]
-    sys_daily_sales = None
-    sys_stock_days = None
-    sys_status = None
-    if not sop_match.empty:
-        sys_stock_days = sop_match['Stock_Days'].values[0]
-        sys_daily_sales = sop_match['Avg_Daily_Sales'].values[0]
-        sys_status = sop_match['Status'].values[0]
+    # Get system prediction (aggregated)
+    sys_daily_sales, sys_has_oos, sys_found = get_system_prediction_for_product(product_row, sop_df)
 
-    # Historical data
+    # Historical data (now aggregated)
     historical = product_row[date_columns].values.astype(float)
     dates = pd.to_datetime([f"{d}-01" for d in date_columns])
     hist_df = pd.DataFrame({'Date': dates, 'Demand': historical}).dropna()
@@ -337,13 +372,13 @@ def main():
     safety_7d = calculate_safety_stock(hist_df['Demand'].values, 7)
     safety_14d = calculate_safety_stock(hist_df['Demand'].values, 14)
 
-    # Our predictions (demand + safety)
+    # Our predictions
     our_need_1d = forecast_result['demand_1d'] + safety_1d
     our_need_7d = forecast_result['demand_7d'] + safety_7d
     our_need_14d = forecast_result['demand_14d'] + safety_14d
 
-    # System predictions (using their daily sales)
-    if sys_daily_sales and pd.notna(sys_daily_sales):
+    # System predictions
+    if sys_daily_sales and sys_daily_sales > 0:
         sys_need_1d = sys_daily_sales * 1
         sys_need_7d = sys_daily_sales * 7
         sys_need_14d = sys_daily_sales * 14
@@ -363,44 +398,41 @@ def main():
         sys_order_1d = sys_order_7d = sys_order_14d = None
 
     # ================================================================
-    # MAIN DISPLAY: ORDER RECOMMENDATION
+    # MAIN DISPLAY
     # ================================================================
     st.markdown("---")
-    st.markdown(f"## 📊 {product_row['Product_Name']}")
+    num_codes = product_row.get('Num_Codes', 1)
+    st.markdown(f"## 📊 {product_name}")
+    st.caption(f"Αθροισμένο από {num_codes} κωδικούς υλικού")
 
-    # BIG ORDER RECOMMENDATION BOX
+    # BIG ORDER RECOMMENDATION
     st.markdown("### 🛒 ΠΟΣΟΤΗΤΑ ΓΙΑ ΠΑΡΑΓΓΕΛΙΑ")
 
     if our_order_7d > 0:
         st.markdown(f"""
         <div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 3px solid #dc3545; text-align: center;">
         <h1 style="color: #721c24; margin: 0;">⚠️ ΠΑΡΑΓΓΕΙΛΕ: {our_order_7d:,.0f} κιβώτια</h1>
-        <p style="color: #721c24; font-size: 16px; margin: 10px 0 0 0;">Για κάλυψη επόμενων 7 ημερών (βάσει δικής μας πρόβλεψης)</p>
+        <p style="color: #721c24; font-size: 16px; margin: 10px 0 0 0;">Για κάλυψη επόμενων 7 ημερών</p>
         </div>
         """, unsafe_allow_html=True)
     else:
         st.markdown(f"""
         <div style="background-color: #d4edda; padding: 20px; border-radius: 10px; border: 3px solid #28a745; text-align: center;">
-        <h1 style="color: #155724; margin: 0;">✅ ΕΠΑΡΚΕΙΑ - Δεν χρειάζεται παραγγελία</h1>
+        <h1 style="color: #155724; margin: 0;">✅ ΕΠΑΡΚΕΙΑ</h1>
         <p style="color: #155724; font-size: 16px; margin: 10px 0 0 0;">Το απόθεμα καλύπτει τις επόμενες 7 ημέρες</p>
         </div>
         """, unsafe_allow_html=True)
 
     st.markdown("")
 
-    # ================================================================
     # CURRENT STOCK
-    # ================================================================
-    st.markdown("### 📦 Τρέχον Απόθεμα (από S1P)")
+    st.markdown("### 📦 Τρέχον Απόθεμα (σύνολο όλων κωδικών)")
     st.metric("Διαθέσιμο", f"{current_stock:,} κιβώτια")
 
-    # ================================================================
-    # COMPARISON TABLE: SYSTEM vs OUR PREDICTION
-    # ================================================================
+    # COMPARISON TABLE
     st.markdown("---")
-    st.markdown("### ⚖️ Σύγκριση: Υπάρχον Σύστημα vs Δική μας Πρόβλεψη")
+    st.markdown("### ⚖️ Σύγκριση: Σύστημα vs Δική μας Πρόβλεψη")
 
-    # Create comparison dataframe
     comparison_data = {
         'Περίοδος': ['1 Ημέρα', '7 Ημέρες', '14 Ημέρες'],
         '📋 Σύστημα - Ζήτηση': [
@@ -428,24 +460,17 @@ def main():
     comparison_df = pd.DataFrame(comparison_data)
     st.dataframe(comparison_df, use_container_width=True, hide_index=True)
 
-    # Legend
     col_legend1, col_legend2 = st.columns(2)
     with col_legend1:
-        st.caption("📋 **Υπάρχον Σύστημα**: Από Excel (SOP sheet)")
+        st.caption("📋 **Σύστημα**: Από Excel (SOP)")
     with col_legend2:
-        method_name = "Holt-Winters Time Series" if forecast_result['method'] == 'holt_winters' else "Μέσος Όρος"
-        st.caption(f"🤖 **Δική μας Πρόβλεψη**: {method_name}")
+        method_name = "Holt-Winters" if forecast_result['method'] == 'holt_winters' else "Μέσος Όρος"
+        st.caption(f"🤖 **Εμείς**: {method_name}")
 
-    # Show system status if available
-    if sys_status and pd.notna(sys_status):
-        if sys_status == "OOS":
-            st.error(f"📋 Υπάρχον σύστημα: **🔴 OOS** (Out of Stock)")
-        else:
-            st.success(f"📋 Υπάρχον σύστημα: **✅ OK**")
+    if sys_has_oos:
+        st.error("📋 Υπάρχον σύστημα: **🔴 OOS**")
 
-    # ================================================================
     # FORECAST DETAILS
-    # ================================================================
     st.markdown("---")
     st.markdown("### 📈 Λεπτομέρειες Πρόβλεψης")
 
@@ -458,33 +483,17 @@ def main():
         st.write(f"- Ημερήσια ζήτηση: **{forecast_result['daily_avg']:.1f}** κιβώτια")
         if 'mape' in forecast_result:
             st.write(f"- Σφάλμα (MAPE): **{forecast_result['mape']:.1f}%**")
-        if 'seasonal_factor' in forecast_result:
-            sf = forecast_result['seasonal_factor']
-            if sf > 1.1:
-                st.write(f"- Εποχικότητα: **↑ {(sf-1)*100:.0f}% πάνω από μ.ο.**")
-            elif sf < 0.9:
-                st.write(f"- Εποχικότητα: **↓ {(1-sf)*100:.0f}% κάτω από μ.ο.**")
 
     with col_details2:
-        if sys_daily_sales and pd.notna(sys_daily_sales):
-            st.markdown("**Υπάρχον Σύστημα:**")
+        if sys_daily_sales and sys_daily_sales > 0:
+            st.markdown("**Σύστημα:**")
             st.write(f"- Ημερήσια ζήτηση: **{sys_daily_sales:.0f}** κιβώτια")
-            if sys_stock_days and pd.notna(sys_stock_days):
-                st.write(f"- Ημέρες αποθέματος: **{sys_stock_days:.0f}**")
-
-            # Compare daily sales estimates
-            if forecast_result['daily_avg'] > 0:
-                diff_pct = ((forecast_result['daily_avg'] - sys_daily_sales) / sys_daily_sales) * 100
-                if abs(diff_pct) > 15:
-                    st.info(f"Διαφορά στην εκτίμηση ζήτησης: **{diff_pct:+.0f}%**")
         else:
-            st.warning("Δεν βρέθηκαν δεδομένα συστήματος για αυτό το προϊόν")
+            st.warning("Δεν βρέθηκαν δεδομένα συστήματος")
 
-    # ================================================================
-    # HISTORICAL CHART
-    # ================================================================
+    # CHART
     st.markdown("---")
-    st.markdown("### 📊 Ιστορικά Δεδομένα (2024-2025)")
+    st.markdown("### 📊 Ιστορικά (Αθροισμένα)")
 
     if len(hist_df) > 0:
         fig = go.Figure()
@@ -498,18 +507,16 @@ def main():
             color = colors.get(year, '#1f77b4')
             fig.add_trace(go.Scatter(
                 x=year_data['Month'],
-                y=year_data['Demand'] / 30,  # Daily average
+                y=year_data['Demand'] / 30,
                 name=f'{year}',
                 mode='lines+markers',
                 line=dict(color=color, width=3),
                 marker=dict(size=10)
             ))
 
-        # Add current month vertical line
         fig.add_vline(x=current_month, line_dash="dash", line_color="red",
                      annotation_text="Τώρα", annotation_position="top")
 
-        # Add forecast point
         fig.add_trace(go.Scatter(
             x=[current_month],
             y=[forecast_result['daily_avg']],
@@ -528,28 +535,23 @@ def main():
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        st.caption("Το γράφημα δείχνει την ημερήσια ζήτηση ανά μήνα. Η πρόβλεψή μας λαμβάνει υπόψη την τάση και εποχικότητα από όλα τα έτη.")
-
     # ================================================================
     # ALL PRODUCTS SUMMARY
     # ================================================================
     st.markdown("---")
-    st.subheader("📋 Όλα τα Προϊόντα - Γρήγορη Επισκόπηση")
+    st.subheader("📋 Όλα τα Προϊόντα")
 
     summary_data = []
     for idx, row in filtered_df.iterrows():
         hist = pd.Series(row[date_columns].values.astype(float)).dropna()
-        mat = row['Material']
-        product_name = str(row['Product_Name'])[:40]
+        pname = str(row['Product_Name'])[:40]
+        num_codes = row.get('Num_Codes', 1)
 
-        # Stock from S1P
-        stock_row = stock_df[stock_df['Material'] == mat]
-        curr = int(stock_row['Unrestricted stock'].values[0]) if not stock_row.empty else 0
+        # Total stock for this product
+        curr = get_total_stock_for_product(row, stock_df)
 
         # System data
-        sop_row = sop_df[sop_df['MRDR'].str.contains(mat, na=False)]
-        s_daily = sop_row['Avg_Daily_Sales'].values[0] if not sop_row.empty and pd.notna(sop_row['Avg_Daily_Sales'].values[0]) else None
-        s_status = sop_row['Status'].values[0] if not sop_row.empty else None
+        s_daily, s_oos, _ = get_system_prediction_for_product(row, sop_df)
 
         # Our forecast
         positive_hist = hist[hist > 0]
@@ -564,31 +566,29 @@ def main():
         sys_order = max(0, sys_need - curr) if sys_need else None
 
         summary_data.append({
-            'Material': mat,
-            'Προϊόν': product_name,
+            'Προϊόν': pname,
+            'Κωδ.': num_codes,
             'Απόθεμα': curr,
-            '🤖 Παραγγελία 7ημ': int(our_order) if our_order > 0 else 0,
-            '📋 Παραγγελία 7ημ': int(sys_order) if sys_order and sys_order > 0 else (0 if sys_order is not None else None),
-            '📋 Status': "🔴" if s_status == "OOS" else ("✅" if pd.notna(s_status) else "—"),
+            '🤖 Παραγγ.': int(our_order) if our_order > 0 else 0,
+            '📋 Παραγγ.': int(sys_order) if sys_order and sys_order > 0 else (0 if sys_order is not None else None),
+            '📋': "🔴" if s_oos else ("✅" if s_daily else "—"),
         })
 
     summary_df = pd.DataFrame(summary_data)
-
-    # Sort by our order recommendation (highest first)
-    summary_df = summary_df.sort_values('🤖 Παραγγελία 7ημ', ascending=False)
+    summary_df = summary_df.sort_values('🤖 Παραγγ.', ascending=False)
 
     st.dataframe(
         summary_df.style.format({
             'Απόθεμα': lambda x: f"{x:,}" if pd.notna(x) else "—",
-            '🤖 Παραγγελία 7ημ': lambda x: f"{x:,}" if pd.notna(x) and x > 0 else "✅",
-            '📋 Παραγγελία 7ημ': lambda x: f"{x:,}" if pd.notna(x) and x > 0 else ("✅" if pd.notna(x) else "—"),
+            '🤖 Παραγγ.': lambda x: f"{x:,}" if pd.notna(x) and x > 0 else "✅",
+            '📋 Παραγγ.': lambda x: f"{x:,}" if pd.notna(x) and x > 0 else ("✅" if pd.notna(x) else "—"),
         }),
         use_container_width=True,
         height=400
     )
 
-    st.caption("🤖 = Δική μας πρόβλεψη | 📋 = Υπάρχον σύστημα | Ταξινόμηση: Μεγαλύτερη ανάγκη παραγγελίας πρώτα")
-    st.caption("v2.2 - 01/01/2026")
+    st.caption("🤖 = Δική μας | 📋 = Σύστημα | Κωδ. = Αριθμός κωδικών υλικού")
+    st.caption("v3.0 - Ομαδοποίηση κατά περιγραφή")
 
 if __name__ == "__main__":
     main()
