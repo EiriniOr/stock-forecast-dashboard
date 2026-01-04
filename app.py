@@ -1,28 +1,44 @@
 """
-Stock Dashboard - Historical Data + Manual Estimation
-Πίνακας Αποθέματος - Ιστορικά Δεδομένα + Χειροκίνητη Εκτίμηση
+Stock Forecasting Dashboard
+Run: streamlit run app.py
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from pathlib import Path
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import PolynomialFeatures
 import warnings
 warnings.filterwarnings('ignore')
 
-st.set_page_config(page_title="Πίνακας Αποθέματος", layout="wide")
+st.set_page_config(page_title="Stock Forecast Dashboard", layout="wide")
 
 # --- DATA LOADING ---
+def find_excel_file():
+    """Auto-detect xlsx file in same folder as script"""
+    script_dir = Path(__file__).parent
+    xlsx_files = list(script_dir.glob("*.xlsx"))
+    # Filter out temp files (starting with ~$)
+    xlsx_files = [f for f in xlsx_files if not f.name.startswith("~$")]
+    if xlsx_files:
+        # Return most recently modified
+        return str(max(xlsx_files, key=lambda x: x.stat().st_mtime))
+    return None
+
 @st.cache_data
-def load_data(uploaded_file):
-    """Load all relevant sheets from Excel and aggregate by product description"""
+def load_data(file_path):
+    """Parse the Excel file and extract structured data"""
 
-    # 1. Cases sheet - historical sales
-    df_raw = pd.read_excel(uploaded_file, sheet_name='Cases2021 2022 FC', header=None)
+    # Read cases/sales data
+    df_raw = pd.read_excel(file_path, sheet_name='Cases2021 2022 FC', header=None)
 
-    years_row = df_raw.iloc[8, 3:26].values
-    months_row = df_raw.iloc[9, 3:26].values
+    # Extract years from row 8 and months from row 9
+    years_row = df_raw.iloc[8, 3:27].values
+    months_row = df_raw.iloc[9, 3:27].values
 
+    # Build date columns
     date_cols = []
     for y, m in zip(years_row, months_row):
         if pd.notna(y) and pd.notna(m):
@@ -33,454 +49,474 @@ def load_data(uploaded_file):
         else:
             date_cols.append(None)
 
+    # Get data starting from row 10
     data_df = df_raw.iloc[10:].copy()
+
+    # Create column names
     col_names = ['Category', 'SKU_Code', 'Product_Name']
     for i, dc in enumerate(date_cols):
-        col_names.append(dc if dc else f'extra_{i}')
+        if dc:
+            col_names.append(dc)
+        else:
+            col_names.append(f'extra_{i}')
 
+    # Add remaining columns
     remaining = len(data_df.columns) - len(col_names)
     for i in range(remaining):
         col_names.append(f'meta_{i}')
 
     data_df.columns = col_names[:len(data_df.columns)]
+
+    # Filter valid rows
     data_df = data_df[data_df['SKU_Code'].notna()].reset_index(drop=True)
+
+    # Clean SKU codes
     data_df['SKU_Code'] = data_df['SKU_Code'].astype(str).str.strip()
-    data_df['Material'] = data_df['SKU_Code'].str[-8:]
+    data_df['SKU_Short'] = data_df['SKU_Code'].str[-8:]
 
-    date_columns = [c for c in data_df.columns if c and '-' in str(c) and str(c)[:4].isdigit()]
+    # Get date columns only
+    date_columns = [c for c in data_df.columns if '-' in str(c) and str(c)[:4].isdigit()]
 
-    # 2. S1P sheet - current stock
-    uploaded_file.seek(0)
-    df_s1p = pd.read_excel(uploaded_file, sheet_name='S1P')
-    stock_by_material = df_s1p.groupby('Material').agg({
-        'Unrestricted stock': 'sum',
-        'Description': 'first',
-        'Category': 'first'
-    }).reset_index()
-    stock_by_material['Material'] = stock_by_material['Material'].astype(str)
+    # Read stock data
+    df_stock = pd.read_excel(file_path, sheet_name='Stock')
+    df_stock['Material Code'] = df_stock['Material Code'].astype(str).str.strip()
 
-    # 3. SOP sheet - system predictions
-    uploaded_file.seek(0)
-    df_sop = pd.read_excel(uploaded_file, sheet_name='SOP', header=2)
-    df_sop.columns = ['Category_SOP', 'Trade', 'MRDR', 'Product_Desc', 'Link', 'Status',
-                      'Avg_Daily_Sales', 'Stock_Days', 'Days_Till_Avail', 'Available_Stock'] + \
-                     [f'extra_{i}' for i in range(len(df_sop.columns) - 10)]
-    df_sop['MRDR'] = df_sop['MRDR'].astype(str).str.strip()
+    return data_df, df_stock, date_columns
 
-    # Aggregate by Product_Name
-    agg_dict = {col: 'sum' for col in date_columns}
-    agg_dict['Category'] = 'first'
-    agg_dict['Material'] = lambda x: list(x)
+# --- FORECASTING ---
+def forecast_demand(historical_data, periods_ahead=12):
+    """Simple forecasting using trend + seasonality"""
 
-    grouped_df = data_df.groupby('Product_Name').agg(agg_dict).reset_index()
-    grouped_df['Material_Codes'] = grouped_df['Material']
-    grouped_df['Material'] = grouped_df['Material_Codes'].apply(lambda x: x[0] if x else '')
-    grouped_df['Num_Codes'] = grouped_df['Material_Codes'].apply(len)
+    data = pd.Series(historical_data).dropna()
+    if len(data) < 6:
+        return None, None, None
 
-    return grouped_df, stock_by_material, df_sop, date_columns, data_df
+    # Prepare features
+    X = np.arange(len(data)).reshape(-1, 1)
+    y = data.values
 
+    # Fit linear trend
+    model = LinearRegression()
+    model.fit(X, y)
 
-def get_total_stock(product_row, stock_df):
-    """Get total stock across all material codes"""
-    material_codes = product_row.get('Material_Codes', [product_row.get('Material', '')])
-    if isinstance(material_codes, str):
-        material_codes = [material_codes]
+    # Predict future
+    future_X = np.arange(len(data), len(data) + periods_ahead).reshape(-1, 1)
+    forecast = model.predict(future_X)
 
-    total = 0
-    for mat in material_codes:
-        match = stock_df[stock_df['Material'] == str(mat)]
-        if not match.empty:
-            total += int(match['Unrestricted stock'].values[0])
-    return total
+    # Calculate metrics
+    fitted = model.predict(X)
+    residuals = y - fitted
+    rmse = np.sqrt(np.mean(residuals**2))
 
-
-def get_system_data(product_row, sop_df):
-    """Get system daily sales and OOS status"""
-    material_codes = product_row.get('Material_Codes', [product_row.get('Material', '')])
-    if isinstance(material_codes, str):
-        material_codes = [material_codes]
-
-    total_daily = 0
-    has_oos = False
-
-    for mat in material_codes:
-        match = sop_df[sop_df['MRDR'].str.contains(str(mat), na=False)]
-        if not match.empty:
-            daily = match['Avg_Daily_Sales'].values[0]
-            if pd.notna(daily):
-                total_daily += daily
-            if match['Status'].values[0] == "OOS":
-                has_oos = True
-
-    return total_daily if total_daily > 0 else None, has_oos
-
-
-def calculate_historical_stats(historical_values, date_columns):
-    """Calculate historical statistics for decision making"""
-    current_month = datetime.now().month
-    current_year = datetime.now().year
-
-    # Parse dates
-    dates = pd.to_datetime([f"{d}-01" for d in date_columns])
-    df = pd.DataFrame({'date': dates, 'sales': historical_values})
-    df = df.dropna()
-    df['month'] = df['date'].dt.month
-    df['year'] = df['date'].dt.year
-
-    # Only positive sales
-    positive = df[df['sales'] > 0]
-
-    if len(positive) == 0:
-        return None
-
-    stats = {}
-
-    # Overall average (monthly, converted to daily)
-    stats['avg_monthly'] = positive['sales'].mean()
-    stats['avg_daily'] = stats['avg_monthly'] / 30
-
-    # Last 3 months average
-    last_3 = positive.tail(3)
-    if len(last_3) > 0:
-        stats['last_3m_avg_monthly'] = last_3['sales'].mean()
-        stats['last_3m_avg_daily'] = stats['last_3m_avg_monthly'] / 30
-    else:
-        stats['last_3m_avg_monthly'] = stats['avg_monthly']
-        stats['last_3m_avg_daily'] = stats['avg_daily']
-
-    # Same month last year
-    same_month_ly = positive[(positive['month'] == current_month) & (positive['year'] == current_year - 1)]
-    if len(same_month_ly) > 0:
-        stats['same_month_ly'] = same_month_ly['sales'].values[0]
-        stats['same_month_ly_daily'] = stats['same_month_ly'] / 30
-    else:
-        stats['same_month_ly'] = None
-        stats['same_month_ly_daily'] = None
-
-    # Last month
-    last_month = positive.iloc[-1] if len(positive) > 0 else None
-    if last_month is not None:
-        stats['last_month'] = last_month['sales']
-        stats['last_month_daily'] = stats['last_month'] / 30
-    else:
-        stats['last_month'] = None
-        stats['last_month_daily'] = None
-
-    # Trend (compare last 3 months to previous 3 months)
-    if len(positive) >= 6:
-        recent = positive.tail(3)['sales'].mean()
-        previous = positive.iloc[-6:-3]['sales'].mean()
-        if previous > 0:
-            trend_pct = ((recent - previous) / previous) * 100
-            if trend_pct > 10:
-                stats['trend'] = 'up'
-                stats['trend_pct'] = trend_pct
-            elif trend_pct < -10:
-                stats['trend'] = 'down'
-                stats['trend_pct'] = trend_pct
+    # Seasonal adjustment (simple monthly pattern if > 12 months)
+    if len(data) >= 12:
+        monthly_avg = []
+        for m in range(12):
+            month_vals = [data.iloc[i] for i in range(m, len(data), 12) if i < len(data)]
+            if month_vals:
+                monthly_avg.append(np.mean(month_vals))
             else:
-                stats['trend'] = 'stable'
-                stats['trend_pct'] = trend_pct
-        else:
-            stats['trend'] = 'stable'
-            stats['trend_pct'] = 0
-    else:
-        stats['trend'] = 'unknown'
-        stats['trend_pct'] = 0
+                monthly_avg.append(np.mean(data))
 
-    # Volatility (coefficient of variation)
-    if len(positive) >= 3:
-        stats['volatility'] = (positive['sales'].std() / positive['sales'].mean()) * 100
-    else:
-        stats['volatility'] = 0
+        overall_avg = np.mean(data)
+        seasonal_factors = [m / overall_avg if overall_avg > 0 else 1 for m in monthly_avg]
 
-    return stats
+        # Apply seasonality to forecast
+        start_month = len(data) % 12
+        for i in range(len(forecast)):
+            month_idx = (start_month + i) % 12
+            forecast[i] *= seasonal_factors[month_idx]
 
+    # Ensure non-negative
+    forecast = np.maximum(forecast, 0)
+
+    return forecast, rmse, model
+
+def calculate_safety_stock(historical_data, service_level=0.95):
+    """Calculate safety stock based on demand variability"""
+    data = pd.Series(historical_data).dropna()
+    if len(data) < 3:
+        return 0
+
+    # Z-score for service level
+    z_scores = {0.90: 1.28, 0.95: 1.65, 0.99: 2.33}
+    z = z_scores.get(service_level, 1.65)
+
+    std_dev = data.std()
+    lead_time = 1  # months
+
+    safety_stock = z * std_dev * np.sqrt(lead_time)
+    return max(0, safety_stock)
 
 # --- MAIN APP ---
 def main():
-    st.title("📦 Πίνακας Αποθέματος")
-    st.caption("Ιστορικά δεδομένα + χειροκίνητη εκτίμηση παραγγελίας")
+    st.title("Stock Forecasting Dashboard")
 
-    uploaded_file = st.file_uploader(
-        "Ανέβασε το αρχείο Excel",
-        type=['xlsx'],
-        help="Αρχείο με sheets 'Cases2021 2022 FC', 'S1P', και 'SOP'"
-    )
+    # Auto-detect xlsx file in same folder
+    auto_file = find_excel_file()
 
-    if uploaded_file is None:
-        st.info("👆 Ανέβασε το αρχείο Excel για να ξεκινήσεις")
+    # Sidebar
+    st.sidebar.header("Settings")
+
+    if auto_file:
+        st.sidebar.success(f"Using: {Path(auto_file).name}")
+        file_path = auto_file
+    else:
+        st.error("No .xlsx file found in the app folder!")
+        st.info("Place your Excel file in the same folder as this app")
         return
 
+    # Button to clear cache and reload (for updated data)
+    if st.sidebar.button("Reload Data"):
+        st.cache_data.clear()
+        st.rerun()
+
+    # Load data
     try:
-        grouped_df, stock_df, sop_df, date_columns, raw_df = load_data(uploaded_file)
+        data_df, stock_df, date_columns = load_data(file_path)
     except Exception as e:
-        st.error(f"Σφάλμα: {e}")
+        st.error(f"Error loading data: {e}")
         return
 
-    # --- FILTERING ---
-    def is_inactive(row):
-        recent = date_columns[-6:] if len(date_columns) >= 6 else date_columns
-        values = pd.Series(row[recent].values.astype(float)).dropna()
-        if len(values) == 0:
-            return True
-        return (values <= 0).all()
+    st.sidebar.success(f"Loaded {len(data_df)} products")
 
-    grouped_df['_inactive'] = grouped_df.apply(is_inactive, axis=1)
+    # Product selection
+    st.sidebar.header("Product Selection")
 
-    st.markdown("---")
+    # Category filter
+    categories = ['All'] + sorted(data_df['Category'].dropna().unique().tolist())
+    selected_category = st.sidebar.selectbox("Category", categories)
 
-    show_inactive = st.checkbox("Εμφάνιση ανενεργών προϊόντων (χωρίς πωλήσεις 6μ)", value=False)
+    if selected_category != 'All':
+        filtered_df = data_df[data_df['Category'] == selected_category]
+    else:
+        filtered_df = data_df
 
-    working_df = grouped_df if show_inactive else grouped_df[~grouped_df['_inactive']]
-
-    st.caption(f"Εμφανίζονται {len(working_df)}/{len(grouped_df)} προϊόντα")
-
-    col1, col2 = st.columns([2, 3])
-
-    with col1:
-        categories = ['Όλες'] + sorted(working_df['Category'].dropna().unique().tolist())
-        selected_category = st.selectbox("Κατηγορία", categories)
-
-    filtered_df = working_df if selected_category == 'Όλες' else working_df[working_df['Category'] == selected_category]
-    filtered_df = filtered_df.reset_index(drop=True)
-
+    # Product selector
     product_options = filtered_df.apply(
-        lambda x: f"{str(x['Product_Name'])[:50]}", axis=1
+        lambda x: f"{x['SKU_Short']} - {str(x['Product_Name'])[:40]}", axis=1
     ).tolist()
 
-    with col2:
-        selected_product = st.selectbox("Προϊόν", product_options)
-
     if not product_options:
-        st.warning("Δεν βρέθηκαν προϊόντα")
+        st.warning("No products in selected category")
         return
 
-    # Get data
+    selected_product = st.sidebar.selectbox("Select Product", product_options)
+
+    # Get selected product data
     selected_idx = product_options.index(selected_product)
     product_row = filtered_df.iloc[selected_idx]
 
-    current_stock = get_total_stock(product_row, stock_df)
-    sys_daily, sys_oos = get_system_data(product_row, sop_df)
+    # Forecast settings
+    st.sidebar.header("Forecast Settings")
+    forecast_months = st.sidebar.slider("Forecast Horizon (months)", 1, 24, 12)
+    service_level = st.sidebar.selectbox("Service Level", [0.90, 0.95, 0.99], index=1)
 
+    # --- MAIN CONTENT ---
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric("SKU Code", product_row['SKU_Short'])
+    with col2:
+        st.metric("Category", product_row['Category'])
+    with col3:
+        # Check current stock
+        sku_short = product_row['SKU_Short']
+        stock_match = stock_df[stock_df['Material Code'].str.contains(sku_short, na=False)]
+        if not stock_match.empty:
+            current_stock = stock_match.iloc[0]['Unrestricted Stock']
+            st.metric("Current Stock", f"{int(current_stock):,}")
+        else:
+            st.metric("Current Stock", "N/A")
+
+    st.subheader(product_row['Product_Name'])
+
+    # Extract historical data
     historical = product_row[date_columns].values.astype(float)
-    stats = calculate_historical_stats(historical, date_columns)
-
-    # ================================================================
-    # MAIN DISPLAY
-    # ================================================================
-    st.markdown("---")
-    st.markdown(f"## 📊 {product_row['Product_Name']}")
-
-    if stats is None:
-        st.warning("Δεν υπάρχουν αρκετά ιστορικά δεδομένα")
-        return
-
-    # --- CURRENT STATUS ---
-    st.markdown("### 📦 Τρέχουσα Κατάσταση")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric("Απόθεμα Τώρα", f"{current_stock:,} κιβώτια")
-
-    with col2:
-        if stats['last_3m_avg_daily'] > 0:
-            days_coverage = current_stock / stats['last_3m_avg_daily']
-            color = "🟢" if days_coverage > 14 else "🟡" if days_coverage > 7 else "🔴"
-            st.metric(f"{color} Κάλυψη (με πρόσφατο ρυθμό)", f"{days_coverage:.0f} ημέρες")
-        else:
-            st.metric("Κάλυψη", "—")
-
-    with col3:
-        if sys_daily and sys_daily > 0:
-            sys_days = current_stock / sys_daily
-            st.metric("Κάλυψη (σύστημα)", f"{sys_days:.0f} ημέρες")
-            if sys_oos:
-                st.error("⚠️ Σύστημα: OOS")
-        else:
-            st.metric("Κάλυψη (σύστημα)", "—")
-
-    # --- HISTORICAL DATA ---
-    st.markdown("---")
-    st.markdown("### 📈 Ιστορικά Δεδομένα Πωλήσεων")
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        st.metric("Μ.Ο. Ημερήσιος (τελευταίοι 3μ)", f"{stats['last_3m_avg_daily']:.1f}")
-
-    with col2:
-        st.metric("Μ.Ο. Ημερήσιος (συνολικός)", f"{stats['avg_daily']:.1f}")
-
-    with col3:
-        if stats['same_month_ly_daily']:
-            st.metric("Ίδιος μήνας πέρυσι", f"{stats['same_month_ly_daily']:.1f}/ημ")
-        else:
-            st.metric("Ίδιος μήνας πέρυσι", "—")
-
-    with col4:
-        trend_icon = "📈" if stats['trend'] == 'up' else "📉" if stats['trend'] == 'down' else "➡️"
-        trend_text = f"{stats['trend_pct']:+.0f}%" if stats['trend'] != 'unknown' else "?"
-        st.metric(f"{trend_icon} Τάση", trend_text)
-
-    # Volatility warning
-    if stats['volatility'] > 50:
-        st.warning(f"⚠️ Υψηλή μεταβλητότητα ({stats['volatility']:.0f}%) - οι εκτιμήσεις έχουν αβεβαιότητα")
-
-    # --- MANUAL ORDER CALCULATOR ---
-    st.markdown("---")
-    st.markdown("### 🧮 Υπολογισμός Παραγγελίας")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        target_days = st.slider(
-            "Πόσες ημέρες θέλεις να καλύψεις;",
-            min_value=7, max_value=60, value=14, step=7
-        )
-
-        rate_option = st.radio(
-            "Με ποιο ρυθμό πωλήσεων;",
-            ["Πρόσφατος (3μ)", "Συνολικός Μ.Ο.", "Σύστημα", "Χειροκίνητα"]
-        )
-
-    with col2:
-        if rate_option == "Πρόσφατος (3μ)":
-            daily_rate = stats['last_3m_avg_daily']
-        elif rate_option == "Συνολικός Μ.Ο.":
-            daily_rate = stats['avg_daily']
-        elif rate_option == "Σύστημα":
-            daily_rate = sys_daily if sys_daily else stats['last_3m_avg_daily']
-        else:
-            daily_rate = st.number_input("Ημερήσιος ρυθμός:", min_value=0.0, value=stats['last_3m_avg_daily'])
-
-        st.metric("Επιλεγμένος ρυθμός", f"{daily_rate:.1f} κιβ./ημέρα")
-
-    # Calculate
-    needed_stock = daily_rate * target_days
-    order_quantity = max(0, needed_stock - current_stock)
-
-    st.markdown("---")
-
-    if order_quantity > 0:
-        st.markdown(f"""
-        <div style="background-color: #fff3cd; padding: 20px; border-radius: 10px; border: 2px solid #ffc107; text-align: center;">
-        <h2 style="color: #856404; margin: 0;">📋 Προτεινόμενη Παραγγελία: {order_quantity:,.0f} κιβώτια</h2>
-        <p style="color: #856404; margin: 10px 0 0 0;">Για κάλυψη {target_days} ημερών με ρυθμό {daily_rate:.1f} κιβ./ημέρα</p>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown(f"""
-        <div style="background-color: #d4edda; padding: 20px; border-radius: 10px; border: 2px solid #28a745; text-align: center;">
-        <h2 style="color: #155724; margin: 0;">✅ Επαρκές απόθεμα</h2>
-        <p style="color: #155724; margin: 10px 0 0 0;">Καλύπτεις {target_days} ημέρες χωρίς παραγγελία</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # Breakdown
-    st.markdown("")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Απαιτούμενο απόθεμα", f"{needed_stock:,.0f}")
-    with col2:
-        st.metric("Τρέχον απόθεμα", f"{current_stock:,}")
-    with col3:
-        st.metric("Διαφορά (παραγγελία)", f"{order_quantity:,.0f}")
-
-    # --- CHART ---
-    st.markdown("---")
-    st.markdown("### 📊 Ιστορικό Πωλήσεων")
-
     dates = pd.to_datetime([f"{d}-01" for d in date_columns])
-    hist_df = pd.DataFrame({'Date': dates, 'Sales': historical})
+
+    # Create historical dataframe
+    hist_df = pd.DataFrame({
+        'Date': dates,
+        'Demand': historical
+    })
     hist_df = hist_df.dropna()
 
-    if len(hist_df) > 0:
-        hist_df['Year'] = hist_df['Date'].dt.year
-        hist_df['Month'] = hist_df['Date'].dt.month
+    # --- HISTORICAL ANALYSIS TAB ---
+    tab1, tab2, tab3, tab4 = st.tabs(["Historical Analysis", "Forecast", "Stock Analysis", "Comparison"])
 
-        fig = go.Figure()
+    with tab1:
+        st.subheader("Historical Demand")
 
-        colors = {2024: '#AB63FA', 2025: '#FFA15A', 2026: '#19D3F3'}
-        for year in sorted(hist_df['Year'].unique()):
-            year_data = hist_df[hist_df['Year'] == year]
-            fig.add_trace(go.Scatter(
-                x=year_data['Month'],
-                y=year_data['Sales'] / 30,
-                name=str(year),
-                mode='lines+markers',
-                line=dict(color=colors.get(year, '#1f77b4'), width=2),
-                marker=dict(size=8)
-            ))
+        if len(hist_df) > 0:
+            fig = px.line(hist_df, x='Date', y='Demand',
+                         title='Monthly Demand Over Time',
+                         markers=True)
+            fig.update_layout(xaxis_title="Month", yaxis_title="Cases")
+            st.plotly_chart(fig, width="stretch")
 
-        # Average line
-        fig.add_hline(y=stats['avg_daily'], line_dash="dash", line_color="gray",
-                     annotation_text=f"Μ.Ο.: {stats['avg_daily']:.1f}")
+            # Statistics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Avg Monthly Demand", f"{hist_df['Demand'].mean():,.0f}")
+            with col2:
+                st.metric("Max Demand", f"{hist_df['Demand'].max():,.0f}")
+            with col3:
+                st.metric("Min Demand", f"{hist_df['Demand'].min():,.0f}")
+            with col4:
+                st.metric("Std Deviation", f"{hist_df['Demand'].std():,.0f}")
 
-        # Current month
-        fig.add_vline(x=datetime.now().month, line_dash="dot", line_color="red",
-                     annotation_text="Τώρα")
+            # Year-over-year comparison
+            st.subheader("Year-over-Year Comparison")
+            hist_df['Year'] = hist_df['Date'].dt.year
+            hist_df['Month'] = hist_df['Date'].dt.month
 
-        fig.update_layout(
-            xaxis_title='Μήνας',
-            yaxis_title='Κιβώτια/Ημέρα',
-            height=350,
-            legend=dict(orientation="h", y=1.1),
-            xaxis=dict(tickmode='array', tickvals=list(range(1,13)),
-                      ticktext=['Ι','Φ','Μ','Α','Μ','Ι','Ι','Α','Σ','Ο','Ν','Δ'])
+            pivot = hist_df.pivot_table(values='Demand', index='Month', columns='Year', aggfunc='sum')
+
+            fig_yoy = go.Figure()
+            for year in pivot.columns:
+                fig_yoy.add_trace(go.Scatter(
+                    x=pivot.index,
+                    y=pivot[year],
+                    name=str(year),
+                    mode='lines+markers'
+                ))
+            fig_yoy.update_layout(
+                title='Demand by Month (Year Comparison)',
+                xaxis_title='Month',
+                yaxis_title='Cases',
+                xaxis=dict(tickmode='array', tickvals=list(range(1,13)),
+                          ticktext=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'])
+            )
+            st.plotly_chart(fig_yoy, width="stretch")
+
+            # Monthly summary table
+            st.subheader("Monthly Summary")
+            st.dataframe(pivot.round(0), width="stretch")
+        else:
+            st.warning("No historical data available")
+
+    with tab2:
+        st.subheader("Demand Forecast")
+
+        if len(hist_df) >= 6:
+            forecast, rmse, model = forecast_demand(hist_df['Demand'].values, forecast_months)
+
+            if forecast is not None:
+                # Create forecast dates
+                last_date = hist_df['Date'].max()
+                forecast_dates = pd.date_range(start=last_date + pd.DateOffset(months=1),
+                                              periods=forecast_months, freq='MS')
+
+                forecast_df = pd.DataFrame({
+                    'Date': forecast_dates,
+                    'Forecast': forecast
+                })
+
+                # Combined chart
+                fig = go.Figure()
+
+                # Historical
+                fig.add_trace(go.Scatter(
+                    x=hist_df['Date'], y=hist_df['Demand'],
+                    name='Historical', mode='lines+markers',
+                    line=dict(color='blue')
+                ))
+
+                # Forecast
+                fig.add_trace(go.Scatter(
+                    x=forecast_df['Date'], y=forecast_df['Forecast'],
+                    name='Forecast', mode='lines+markers',
+                    line=dict(color='red', dash='dash')
+                ))
+
+                # Confidence interval (simple)
+                upper = forecast_df['Forecast'] + 1.96 * rmse
+                lower = np.maximum(forecast_df['Forecast'] - 1.96 * rmse, 0)
+
+                fig.add_trace(go.Scatter(
+                    x=list(forecast_df['Date']) + list(forecast_df['Date'][::-1]),
+                    y=list(upper) + list(lower[::-1]),
+                    fill='toself',
+                    fillcolor='rgba(255,0,0,0.1)',
+                    line=dict(color='rgba(255,0,0,0)'),
+                    name='95% CI'
+                ))
+
+                fig.update_layout(
+                    title=f'{forecast_months}-Month Demand Forecast',
+                    xaxis_title='Date',
+                    yaxis_title='Cases'
+                )
+                st.plotly_chart(fig, width="stretch")
+
+                # Forecast metrics
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Next Month Forecast", f"{forecast[0]:,.0f}")
+                with col2:
+                    st.metric(f"Total {forecast_months}m Forecast", f"{forecast.sum():,.0f}")
+                with col3:
+                    st.metric("Forecast RMSE", f"{rmse:,.0f}")
+                with col4:
+                    safety = calculate_safety_stock(hist_df['Demand'].values, service_level)
+                    st.metric("Safety Stock", f"{safety:,.0f}")
+
+                # Forecast table
+                st.subheader("Forecast Details")
+                forecast_df['Month'] = forecast_df['Date'].dt.strftime('%Y-%m')
+                forecast_df['Forecast'] = forecast_df['Forecast'].round(0).astype(int)
+                st.dataframe(forecast_df[['Month', 'Forecast']], width="stretch")
+            else:
+                st.warning("Could not generate forecast")
+        else:
+            st.warning("Need at least 6 months of data for forecasting")
+
+    with tab3:
+        st.subheader("Stock Position Analysis")
+
+        if not stock_match.empty:
+            stock_row = stock_match.iloc[0]
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown("### Current Stock Levels")
+                st.metric("Unrestricted Stock", f"{int(stock_row['Unrestricted Stock']):,}")
+                st.metric("Available Quantity", f"{int(stock_row['Available Quantity']):,}")
+                st.metric("Quality Inspection", f"{int(stock_row['Quality Inspection Stock']):,}")
+
+            with col2:
+                st.markdown("### Orders & Deliveries")
+                st.metric("Customer Orders", f"{int(stock_row['Cust.Ord.Total Qty']):,}")
+                st.metric("Confirmed Orders", f"{int(stock_row['Cust.Conf.Total Qty']):,}")
+                st.metric("On Deliveries", f"{int(stock_row['Quantities on Deliveries']):,}")
+                st.metric("Goods Receipts", f"{int(stock_row['Goods Receipts Total Qty']):,}")
+
+            # Stock vs Demand analysis
+            if len(hist_df) > 0:
+                avg_monthly = hist_df['Demand'].mean()
+                current = stock_row['Unrestricted Stock']
+
+                if avg_monthly > 0:
+                    months_of_stock = current / avg_monthly
+
+                    st.markdown("### Stock Coverage")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Avg Monthly Demand", f"{avg_monthly:,.0f}")
+                    with col2:
+                        st.metric("Months of Stock", f"{months_of_stock:.1f}")
+                    with col3:
+                        safety = calculate_safety_stock(hist_df['Demand'].values, service_level)
+                        reorder_point = avg_monthly + safety
+                        st.metric("Reorder Point", f"{reorder_point:,.0f}")
+
+                    # Visual gauge
+                    fig = go.Figure(go.Indicator(
+                        mode="gauge+number",
+                        value=months_of_stock,
+                        title={'text': "Months of Stock Coverage"},
+                        gauge={
+                            'axis': {'range': [0, 6]},
+                            'bar': {'color': "darkblue"},
+                            'steps': [
+                                {'range': [0, 1], 'color': "red"},
+                                {'range': [1, 2], 'color': "orange"},
+                                {'range': [2, 4], 'color': "lightgreen"},
+                                {'range': [4, 6], 'color': "green"}
+                            ],
+                            'threshold': {
+                                'line': {'color': "black", 'width': 4},
+                                'thickness': 0.75,
+                                'value': 2
+                            }
+                        }
+                    ))
+                    st.plotly_chart(fig, width="stretch")
+        else:
+            st.info("No current stock data found for this product")
+
+    with tab4:
+        st.subheader("Product Comparison")
+
+        # Multi-select for comparison
+        compare_products = st.multiselect(
+            "Select products to compare",
+            product_options,
+            default=[selected_product]
         )
-        st.plotly_chart(fig, use_container_width=True)
+
+        if compare_products:
+            fig = go.Figure()
+
+            for prod in compare_products:
+                idx = product_options.index(prod)
+                row = filtered_df.iloc[idx]
+                hist = row[date_columns].values.astype(float)
+
+                fig.add_trace(go.Scatter(
+                    x=dates,
+                    y=hist,
+                    name=prod[:30],
+                    mode='lines+markers'
+                ))
+
+            fig.update_layout(
+                title='Product Demand Comparison',
+                xaxis_title='Date',
+                yaxis_title='Cases'
+            )
+            st.plotly_chart(fig, width="stretch")
 
     # --- SUMMARY TABLE ---
-    st.markdown("---")
-    st.subheader("📋 Όλα τα Προϊόντα - Γρήγορη Επισκόπηση")
+    st.header("All Products Summary")
 
+    # Build summary
     summary_data = []
-    for idx, row in filtered_df.iterrows():
-        pname = str(row['Product_Name'])[:35]
-        stock = get_total_stock(row, stock_df)
-        s_daily, s_oos = get_system_data(row, sop_df)
+    for _, row in data_df.iterrows():
+        hist = pd.Series(row[date_columns].values.astype(float)).dropna()
 
-        hist = row[date_columns].values.astype(float)
-        pstats = calculate_historical_stats(hist, date_columns)
+        # Match stock
+        sku = row['SKU_Short']
+        stock_match = stock_df[stock_df['Material Code'].str.contains(sku, na=False)]
+        current_stock = stock_match.iloc[0]['Unrestricted Stock'] if not stock_match.empty else None
 
-        if pstats:
-            daily = pstats['last_3m_avg_daily']
-            days = stock / daily if daily > 0 else 999
-            need_14d = max(0, (daily * 14) - stock)
+        # Calculate forecast
+        if len(hist) >= 6:
+            forecast, _, _ = forecast_demand(hist.values, 3)
+            next_3m = forecast.sum() if forecast is not None else None
         else:
-            daily = 0
-            days = 999
-            need_14d = 0
+            next_3m = None
 
-        status = "🔴" if days < 7 else "🟡" if days < 14 else "🟢"
+        avg_demand = hist.mean() if len(hist) > 0 else None
+        latest = hist.iloc[-1] if len(hist) > 0 else None
 
         summary_data.append({
-            '': status,
-            'Προϊόν': pname,
-            'Απόθεμα': stock,
-            'Ημ/σιος': round(daily, 1) if daily > 0 else None,
-            'Ημέρες': int(days) if days < 999 else None,
-            'Για 14ημ': int(need_14d) if need_14d > 0 else 0,
+            'SKU': sku,
+            'Product': str(row['Product_Name'])[:35],
+            'Category': row['Category'],
+            'Current Stock': current_stock,
+            'Avg Monthly': avg_demand,
+            'Latest Month': latest,
+            'Next 3m Forecast': next_3m,
+            'Months Coverage': current_stock / avg_demand if current_stock and avg_demand and avg_demand > 0 else None
         })
 
     summary_df = pd.DataFrame(summary_data)
-    summary_df = summary_df.sort_values('Ημέρες', ascending=True)
 
+    # Format and display
     st.dataframe(
         summary_df.style.format({
-            'Απόθεμα': lambda x: f"{x:,}" if pd.notna(x) else "—",
-            'Ημ/σιος': lambda x: f"{x:.1f}" if pd.notna(x) else "—",
-            'Ημέρες': lambda x: f"{x:,}" if pd.notna(x) else "999+",
-            'Για 14ημ': lambda x: f"{x:,}" if x > 0 else "✅",
+            'Current Stock': lambda x: f"{int(x):,}" if pd.notna(x) else "-",
+            'Avg Monthly': lambda x: f"{x:,.0f}" if pd.notna(x) else "-",
+            'Latest Month': lambda x: f"{x:,.0f}" if pd.notna(x) else "-",
+            'Next 3m Forecast': lambda x: f"{x:,.0f}" if pd.notna(x) else "-",
+            'Months Coverage': lambda x: f"{x:.1f}" if pd.notna(x) else "-"
         }),
-        use_container_width=True,
+        width="stretch",
         height=400
     )
-
-    st.caption("🔴 <7 ημ | 🟡 7-14 ημ | 🟢 >14 ημ | Ημ/σιος = Μ.Ο. τελευταίων 3μ | Για 14ημ = Παραγγελία για 14 ημέρες κάλυψη")
-    st.caption("v4.0 - Ιστορικά + Χειροκίνητη Εκτίμηση")
 
 if __name__ == "__main__":
     main()
