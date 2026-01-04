@@ -7,7 +7,6 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from pathlib import Path
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
@@ -16,20 +15,13 @@ st.set_page_config(page_title="Stock Dashboard", layout="wide")
 
 MONTH_NAMES_GR = ['Ιαν', 'Φεβ', 'Μαρ', 'Απρ', 'Μαϊ', 'Ιουν', 'Ιουλ', 'Αυγ', 'Σεπ', 'Οκτ', 'Νοε', 'Δεκ']
 
-def find_excel_file():
-    script_dir = Path(__file__).parent
-    xlsx_files = [f for f in script_dir.glob("*.xlsx") if not f.name.startswith("~$")]
-    if xlsx_files:
-        return str(max(xlsx_files, key=lambda x: x.stat().st_mtime))
-    return None
-
 @st.cache_data
-def load_all_data(file_path):
+def load_all_data(uploaded_file):
     """Load CD, S1P, and Cases sheets"""
-    xl = pd.ExcelFile(file_path)
+    xl = pd.ExcelFile(uploaded_file)
 
     # --- CD Sheet: Stock by description ---
-    df_cd = pd.read_excel(file_path, sheet_name='CD')
+    df_cd = pd.read_excel(uploaded_file, sheet_name='CD')
     # Find Unrestricted column (might be named differently)
     unrestricted_col = None
     for col in df_cd.columns:
@@ -54,7 +46,7 @@ def load_all_data(file_path):
     stock_by_desc.columns = ['Description', 'Stock']
 
     # --- S1P Sheet: Check descriptions and shelf life ---
-    df_s1p = pd.read_excel(file_path, sheet_name='S1P')
+    df_s1p = pd.read_excel(uploaded_file, sheet_name='S1P')
 
     # Find description column in S1P
     s1p_desc_col = None
@@ -75,7 +67,7 @@ def load_all_data(file_path):
     s1p_descriptions = set(df_s1p[s1p_desc_col].dropna().astype(str).str.strip().tolist())
 
     # --- Cases Sheet: Historical data and system averages ---
-    df_cases_raw = pd.read_excel(file_path, sheet_name='Cases2021 2022 FC', header=None)
+    df_cases_raw = pd.read_excel(uploaded_file, sheet_name='Cases2021 2022 FC', header=None)
 
     # Extract years from row 8 and months from row 9
     years_row = df_cases_raw.iloc[8, 3:27].values
@@ -174,15 +166,19 @@ def get_seasonal_forecast(historical_values, date_columns, months_ahead=3):
 def main():
     st.title("Stock Dashboard")
 
-    auto_file = find_excel_file()
-
     st.sidebar.header("Ρυθμίσεις")
 
-    if auto_file:
-        st.sidebar.success(f"Αρχείο: {Path(auto_file).name}")
-        file_path = auto_file
-    else:
-        st.error("Δεν βρέθηκε αρχείο .xlsx!")
+    # File uploader
+    uploaded_file = st.sidebar.file_uploader("Ανέβασε αρχείο Excel", type=['xlsx'])
+
+    if uploaded_file is None:
+        st.info("Ανέβασε ένα αρχείο Excel (.xlsx) για να ξεκινήσεις")
+        st.markdown("""
+        **Απαιτούμενα φύλλα:**
+        - `CD` - με στήλη Unrestricted
+        - `S1P` - με περιγραφές και ημ. λήξης
+        - `Cases2021 2022 FC` - ιστορικά δεδομένα
+        """)
         return
 
     if st.sidebar.button("Ανανέωση Δεδομένων"):
@@ -190,12 +186,14 @@ def main():
         st.rerun()
 
     try:
-        stock_by_desc, df_s1p, s1p_descriptions, df_cases, date_columns, shelf_col, s1p_desc_col = load_all_data(file_path)
+        stock_by_desc, df_s1p, s1p_descriptions, df_cases, date_columns, shelf_col, s1p_desc_col = load_all_data(uploaded_file)
     except Exception as e:
         st.error(f"Σφάλμα φόρτωσης: {e}")
         import traceback
         st.code(traceback.format_exc())
         return
+
+    st.sidebar.success(f"Αρχείο: {uploaded_file.name}")
 
     # --- TABS ---
     tab1, tab2 = st.tabs(["Κίνδυνος OOS", "Προώθηση Πωλήσεων"])
