@@ -19,26 +19,33 @@ MONTH_NAMES_GR = ['Ιαν', 'Φεβ', 'Μαρ', 'Απρ', 'Μαϊ', 'Ιουν', 
 def load_all_data(uploaded_file):
     """Load CD, S1P, and Cases sheets"""
     xl = pd.ExcelFile(uploaded_file)
+    available_sheets = xl.sheet_names
 
     # --- CD Sheet: Stock by description ---
     df_cd = pd.read_excel(uploaded_file, sheet_name='CD')
+
     # Find Unrestricted column (might be named differently)
     unrestricted_col = None
     for col in df_cd.columns:
-        if 'unrestricted' in str(col).lower():
+        col_lower = str(col).lower()
+        if 'unrestricted' in col_lower or 'stock' in col_lower or 'qty' in col_lower or 'ποσότητα' in col_lower:
             unrestricted_col = col
             break
+
     if unrestricted_col is None:
-        unrestricted_col = 'Unrestricted'  # fallback
+        # Show available columns for debugging
+        raise ValueError(f"CD sheet: δεν βρέθηκε στήλη stock. Διαθέσιμες στήλες: {list(df_cd.columns)}")
 
     # Find description column
     desc_col = None
     for col in df_cd.columns:
-        if 'description' in str(col).lower() or 'περιγραφή' in str(col).lower():
+        col_lower = str(col).lower()
+        if 'description' in col_lower or 'περιγραφή' in col_lower or 'material' in col_lower:
             desc_col = col
             break
+
     if desc_col is None:
-        desc_col = 'Material Description'  # fallback
+        raise ValueError(f"CD sheet: δεν βρέθηκε στήλη description. Διαθέσιμες στήλες: {list(df_cd.columns)}")
 
     # Aggregate stock by description
     df_cd[unrestricted_col] = pd.to_numeric(df_cd[unrestricted_col], errors='coerce').fillna(0)
@@ -51,11 +58,13 @@ def load_all_data(uploaded_file):
     # Find description column in S1P
     s1p_desc_col = None
     for col in df_s1p.columns:
-        if 'description' in str(col).lower() or 'περιγραφή' in str(col).lower():
+        col_lower = str(col).lower()
+        if 'description' in col_lower or 'περιγραφή' in col_lower or 'material' in col_lower:
             s1p_desc_col = col
             break
+
     if s1p_desc_col is None:
-        s1p_desc_col = 'Material Description'
+        raise ValueError(f"S1P sheet: δεν βρέθηκε στήλη description. Διαθέσιμες στήλες: {list(df_s1p.columns)}")
 
     # Find shelf life column
     shelf_col = None
