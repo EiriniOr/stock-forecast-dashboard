@@ -133,34 +133,21 @@ def get_sales_chart_data(df_cases, mrdr):
     return row['monthly_sales']
 
 
-def calculate_order_quantity(sales_data, current_stock, days=30):
-    """Calculate recommended order quantity based on sales trends."""
+def calculate_order_quantity(sales_data, current_stock, months=1):
+    """Calculate recommended order quantity for lean production."""
     if not sales_data:
         return 0
 
-    # Get current month and year
-    now = datetime.now()
-    current_month = now.month
-
-    # Calculate average sales for this period from previous years
-    relevant_sales = []
-    for entry in sales_data:
-        # Look at the same month range from previous years
-        if entry['sales'] > 0:
-            relevant_sales.append(entry['sales'])
+    # Calculate average monthly sales from positive values
+    relevant_sales = [e['sales'] for e in sales_data if e['sales'] > 0]
 
     if not relevant_sales:
         return 0
 
-    # Calculate average daily sales
     avg_monthly_sales = np.mean(relevant_sales)
-    avg_daily_sales = avg_monthly_sales / 30
 
-    # Calculate needed for the period (considering 1 month lead time)
-    if days <= 30:
-        needed = avg_daily_sales * (days + 30)  # +30 for lead time
-    else:
-        needed = avg_daily_sales * (days + 30)
+    # Calculate needed for the period
+    needed = avg_monthly_sales * months
 
     # Subtract current stock
     order_qty = max(0, needed - current_stock)
@@ -340,9 +327,9 @@ def main():
                     current_stock = calculate_stock_by_mrdr(df_s1p, selected)
                     sales_data = get_sales_chart_data(df_cases, selected)
 
-                    # Calculate order quantities
-                    order_30d = calculate_order_quantity(sales_data, current_stock, 30)
-                    order_90d = calculate_order_quantity(sales_data, current_stock, 90)
+                    # Calculate order quantities (months)
+                    order_1m = calculate_order_quantity(sales_data, current_stock, 1)
+                    order_3m = calculate_order_quantity(sales_data, current_stock, 3)
 
                     # Two columns: Left (predictions), Right (present system)
                     col_left, col_right = st.columns([2, 1])
@@ -350,8 +337,14 @@ def main():
                     with col_left:
                         st.subheader(f"📦 {product_info['description']}")
 
-                        # Current stock metric
-                        st.metric(TRANSLATIONS['current_stock'], f"{current_stock:,} {TRANSLATIONS['units']}")
+                        # Order recommendations at top, smaller
+                        col_o1, col_o2, col_o3 = st.columns([1, 1, 1])
+                        with col_o1:
+                            st.metric(TRANSLATIONS['current_stock'], f"{current_stock:,}")
+                        with col_o2:
+                            st.metric(TRANSLATIONS['order_30days'], f"{order_1m:,}")
+                        with col_o3:
+                            st.metric(TRANSLATIONS['order_3months'], f"{order_3m:,}")
 
                         # Sales chart
                         if sales_data:
@@ -360,29 +353,6 @@ def main():
                                 st.plotly_chart(fig, use_container_width=True)
                         else:
                             st.info("Δεν υπάρχουν δεδομένα πωλήσεων για αυτό το προϊόν")
-
-                        # Order recommendations
-                        st.markdown("---")
-                        st.markdown(f"### 🛒 {TRANSLATIONS['order_now']}")
-
-                        col_o1, col_o2 = st.columns(2)
-                        with col_o1:
-                            st.markdown(f"""
-                            <div style="background-color: #27ae60; padding: 20px; border-radius: 10px; text-align: center;">
-                                <h4 style="color: white; margin: 0;">{TRANSLATIONS['order_30days']}</h4>
-                                <h1 style="color: white; margin: 10px 0; font-size: 3em;">{order_30d:,}</h1>
-                                <p style="color: white; margin: 0;">{TRANSLATIONS['units']}</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-
-                        with col_o2:
-                            st.markdown(f"""
-                            <div style="background-color: #2980b9; padding: 20px; border-radius: 10px; text-align: center;">
-                                <h4 style="color: white; margin: 0;">{TRANSLATIONS['order_3months']}</h4>
-                                <h1 style="color: white; margin: 10px 0; font-size: 3em;">{order_90d:,}</h1>
-                                <p style="color: white; margin: 0;">{TRANSLATIONS['units']}</p>
-                            </div>
-                            """, unsafe_allow_html=True)
 
                     with col_right:
                         st.subheader(f"📋 {TRANSLATIONS['present_system']}")
