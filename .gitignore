@@ -1,0 +1,7 @@
+stock_forecast_venv/
+*.xlsx
+*.xls
+__pycache__/
+*.pyc
+.DS_Store
+~$*
